@@ -207,7 +207,13 @@ impl BatchPaymentContract {
                 merchant: merchant.clone(),
                 customer: item.customer.clone(),
             };
-            env.storage().persistent().set(&DataKey::Payment(id_bytes.clone()), &record);
+            let payment_key = DataKey::Payment(id_bytes.clone());
+            env.storage().persistent().set(&payment_key, &record);
+
+            // Extend TTL for persistent storage to prevent archival after rent period expires (issue #58).
+            // TTL is extended on every read/write; this ensures the entry stays accessible for merchants
+            // and auditors long-term.
+            env.storage().persistent().extend_ttl(&payment_key, 157_680_000, 315_360_000);
 
             // Emit PaymentCreated event — one per batch entry.
             env.events().publish(
