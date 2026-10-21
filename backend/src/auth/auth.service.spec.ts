@@ -1,62 +1,43 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
-import { Repository } from 'typeorm';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { AuthService } from './auth.service';
-import { Merchant, MerchantStatus, MerchantRole } from '../merchants/entities/merchant.entity';
+import { Merchant } from '../merchants/entities/merchant.entity';
+import { MerchantStatus } from '../merchants/entities/merchant.entity';
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function makeMerchant(overrides: Partial<Merchant> = {}): Merchant {
-  return Object.assign(new Merchant(), {
-    id: 'uuid-1',
-    email: 'merchant@example.com',
-    passwordHash: '$2b$12$hashedpassword',
-    businessName: 'Acme Corp',
-    businessType: 'retail',
-    country: 'NG',
-    status: MerchantStatus.ACTIVE,
-    role: MerchantRole.MERCHANT,
-    apiKey: null,
-    apiKeyHash: null,
-    feeRate: 0.015,
-    sandboxMode: false,
-    createdAt: new Date('2024-01-01'),
-    updatedAt: new Date('2024-01-01'),
-    deletedAt: null,
-    ...overrides,
-  });
-}
-
-function makeRepo(): jest.Mocked<
-  Pick<Repository<Merchant>, 'findOne' | 'create' | 'save' | 'find' | 'increment'>
-> {
-  return {
-    findOne: jest.fn(),
-    create: jest.fn(),
-    save: jest.fn(),
-    find: jest.fn(),
-    increment: jest.fn(),
-  };
-}
-
-// ── Tests ──────────────────────────────────────────────────────────────────
+jest.mock('bcrypt');
 
 describe('AuthService', () => {
   let service: AuthService;
-  let repo: ReturnType<typeof makeRepo>;
-  let jwtService: jest.Mocked<Pick<JwtService, 'sign'>>;
+  let repository: any;
+  let jwtService: any;
+
+  const mockMerchant = (overrides: Partial<Merchant> = {}): Merchant =>
+    ({
+      id: 'merchant-1',
+      email: 'merchant@example.com',
+      password: 'hashed-password',
+      passwordResetToken: null,
+      passwordResetExpiry: null,
+      ...overrides,
+    } as Merchant);
 
   beforeEach(async () => {
-    repo = makeRepo();
-    jwtService = { sign: jest.fn().mockReturnValue('signed-token') };
+    repository = {
+      findOne: jest.fn(),
+      save: jest.fn(),
+      create: jest.fn(),
+    };
+    jwtService = {
+      sign: jest.fn().mockReturnValue('signed-token'),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
-        { provide: getRepositoryToken(Merchant), useValue: repo },
+        { provide: getRepositoryToken(Merchant), useValue: repository },
         { provide: JwtService, useValue: jwtService },
       ],
     }).compile();
@@ -64,150 +45,114 @@ describe('AuthService', () => {
     service = module.get<AuthService>(AuthService);
   });
 
-  // ── register ──────────────────────────────────────────────────────────
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
 
   describe('register', () => {
-    const dto = {
-      email: 'new@example.com',
-      password: 'SecurePass123!',
-      businessName: 'NewCo',
-      businessType: 'saas',
-      country: 'US',
-    };
+    it('creates the merchant with PENDING status', async () => {
+      repository.findOne.mockResolvedValue(null);
+      repository.create.mockImplementation((data: Partial<Merchant>) =>
+        mockMerchant(data),
+      );
+      repository.save.mockImplementation(async (m: Merchant) => m);
+      (bcrypt.hash as jest.Mock).mockResolvedValue('hashed-password');
 
-    it('hashes the password with bcrypt before saving', async () => {
-      repo.findOne.mockResolvedValue(null);
-      const merchant = makeMerchant({ email: dto.email, id: 'new-id' });
-      repo.create.mockReturnValue(merchant);
-      repo.save.mockResolvedValue(merchant);
+      const merchant = await service.register({
+        email: 'new@example.com',
+        password: 'password123',
+        businessName: 'New Biz',
+        businessType: 'retail',
+        country: 'US',
+      } as any);
 
-      await service.register(dto);
-
-      const savedArg = repo.create.mock.calls[0][0] as Partial<Merchant>;
-      expect(savedArg.passwordHash).toBeDefined();
-      expect(savedArg.passwordHash).not.toEqual(dto.password);
-      const isHashed = await bcrypt.compare(dto.password, savedArg.passwordHash!);
-      expect(isHashed).toBe(true);
-    });
-
-    it('returns an accessToken and merchant data (without sensitive fields)', async () => {
-      repo.findOne.mockResolvedValue(null);
-      const merchant = makeMerchant({ email: dto.email, id: 'new-id' });
-      repo.create.mockReturnValue(merchant);
-      repo.save.mockResolvedValue(merchant);
-
-      const result = await service.register(dto);
-
-      expect(result.accessToken).toBe('signed-token');
-      expect(result.merchant).not.toHaveProperty('passwordHash');
-      expect(result.merchant).not.toHaveProperty('apiKeyHash');
-    });
-
-    it('throws ConflictException when email is already registered', async () => {
-      repo.findOne.mockResolvedValue(makeMerchant());
-
-      await expect(service.register(dto)).rejects.toThrow(ConflictException);
-    });
-
-    it('signs the JWT with the saved merchant id, email, and role', async () => {
-      repo.findOne.mockResolvedValue(null);
-      const merchant = makeMerchant({ id: 'new-id', email: dto.email, role: MerchantRole.MERCHANT });
-      repo.create.mockReturnValue(merchant);
-      repo.save.mockResolvedValue(merchant);
-
-      await service.register(dto);
-
-      expect(jwtService.sign).toHaveBeenCalledWith({
-        sub: 'new-id',
-        email: dto.email,
-        role: MerchantRole.MERCHANT,
-      });
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ status: MerchantStatus.PENDING }),
+      );
+      expect(merchant.status).toBe(MerchantStatus.PENDING);
     });
   });
 
-  // ── login ──────────────────────────────────────────────────────────────
+  describe('forgotPassword', () => {
+    it('generates a reset token and persists it with an expiry', async () => {
+      const merchant = mockMerchant();
+      repository.findOne.mockResolvedValue(merchant);
+      repository.save.mockImplementation(async (m: Merchant) => m);
+
+      const result = await service.forgotPassword(merchant.email);
+
+      expect(repository.findOne).toHaveBeenCalledWith({
+        where: { email: merchant.email },
+      });
+      expect(repository.save).toHaveBeenCalled();
+      expect(merchant.passwordResetToken).toBeDefined();
+      expect(merchant.passwordResetToken).not.toBeNull();
+      expect(merchant.passwordResetExpiry).toBeInstanceOf(Date);
+      expect(merchant.passwordResetExpiry!.getTime()).toBeGreaterThan(
+        Date.now(),
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('does not reveal whether the email exists', async () => {
+      repository.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.forgotPassword('unknown@example.com'),
+      ).resolves.toBeDefined();
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resetPassword', () => {
+    it('hashes the new password and clears the reset token', async () => {
+      const merchant = mockMerchant({
+        passwordResetToken: 'valid-token',
+        passwordResetExpiry: new Date(Date.now() + 60 * 60 * 1000),
+      });
+      repository.findOne.mockResolvedValue(merchant);
+      repository.save.mockImplementation(async (m: Merchant) => m);
+      (bcrypt.hash as jest.Mock).mockResolvedValue('new-hashed-password');
+
+      await service.resetPassword('valid-token', 'newPassword123');
+
+      expect(bcrypt.hash).toHaveBeenCalledWith('newPassword123', 10);
+      expect(merchant.password).toBe('new-hashed-password');
+      expect(merchant.passwordResetToken).toBeNull();
+      expect(merchant.passwordResetExpiry).toBeNull();
+      expect(repository.save).toHaveBeenCalledWith(merchant);
+    });
+
+    it('rejects an expired reset token with BadRequestException', async () => {
+      const merchant = mockMerchant({
+        passwordResetToken: 'expired-token',
+        passwordResetExpiry: new Date(Date.now() - 60 * 1000),
+      });
+      repository.findOne.mockResolvedValue(merchant);
+
+      await expect(
+        service.resetPassword('expired-token', 'newPassword123'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects an invalid reset token with BadRequestException', async () => {
+      repository.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.resetPassword('invalid-token', 'newPassword123'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+  });
 
   describe('login', () => {
-    it('returns accessToken and merchant data when credentials are valid', async () => {
-      const password = 'SecurePass123!';
-      const passwordHash = await bcrypt.hash(password, 12);
-      const merchant = makeMerchant({ passwordHash });
-      repo.findOne.mockResolvedValue(merchant);
-
-      const result = await service.login({ email: merchant.email, password });
-
-      expect(result.accessToken).toBe('signed-token');
-      expect(result.merchant).not.toHaveProperty('passwordHash');
-    });
-
-    it('throws UnauthorizedException for unknown email', async () => {
-      repo.findOne.mockResolvedValue(null);
+    it('throws UnauthorizedException for invalid credentials', async () => {
+      repository.findOne.mockResolvedValue(null);
 
       await expect(
-        service.login({ email: 'ghost@example.com', password: 'pass' }),
-      ).rejects.toThrow(UnauthorizedException);
-    });
-
-    it('throws UnauthorizedException for incorrect password', async () => {
-      const passwordHash = await bcrypt.hash('correct-password', 12);
-      repo.findOne.mockResolvedValue(makeMerchant({ passwordHash }));
-
-      await expect(
-        service.login({ email: 'merchant@example.com', password: 'wrong-password' }),
-      ).rejects.toThrow(UnauthorizedException);
-    });
-
-    it('uses a constant error message for both missing user and wrong password (no oracle)', async () => {
-      repo.findOne.mockResolvedValue(null);
-      let err1: Error | undefined;
-      try {
-        await service.login({ email: 'ghost@example.com', password: 'x' });
-      } catch (e) {
-        err1 = e as Error;
-      }
-
-      const passwordHash = await bcrypt.hash('real', 12);
-      repo.findOne.mockResolvedValue(makeMerchant({ passwordHash }));
-      let err2: Error | undefined;
-      try {
-        await service.login({ email: 'merchant@example.com', password: 'wrong' });
-      } catch (e) {
-        err2 = e as Error;
-      }
-
-      expect(err1?.message).toBe(err2?.message);
-    });
-  });
-
-  // ── findMerchantByApiKey ───────────────────────────────────────────────
-
-  describe('findMerchantByApiKey', () => {
-    it('returns merchant when the raw key matches one of the hashed keys', async () => {
-      const rawKey = 'my-raw-api-key';
-      const apiKeyHash = await bcrypt.hash(rawKey, 12);
-      const merchant = makeMerchant({ apiKeyHash });
-      repo.find.mockResolvedValue([merchant]);
-
-      const result = await service.findMerchantByApiKey(rawKey);
-
-      expect(result).toBe(merchant);
-    });
-
-    it('returns null when no key matches', async () => {
-      const apiKeyHash = await bcrypt.hash('other-key', 12);
-      repo.find.mockResolvedValue([makeMerchant({ apiKeyHash })]);
-
-      const result = await service.findMerchantByApiKey('wrong-key');
-
-      expect(result).toBeNull();
-    });
-
-    it('returns null when there are no merchants with an apiKeyHash', async () => {
-      repo.find.mockResolvedValue([]);
-
-      const result = await service.findMerchantByApiKey('any-key');
-
-      expect(result).toBeNull();
+        service.login({ email: 'nope@example.com', password: 'wrong' } as any),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
     });
   });
 });

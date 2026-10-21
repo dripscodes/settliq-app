@@ -1,8 +1,8 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
+use soroban_sdk::{testutils::{Address as _, Events}, Address, BytesN, Env, IntoVal, String, Symbol};
 
-use crate::{SettlementLedgerContract, SettlementLedgerContractClient};
+use crate::{AdminTransferredEvent, SettlementLedgerContract, SettlementLedgerContractClient, SettlementVoidedEvent};
 
 fn pid(env: &Env, seed: u8) -> BytesN<32> {
     BytesN::from_array(env, &[seed; 32])
@@ -81,6 +81,27 @@ fn test_admin_rotation_allows_new_admin_to_record() {
     assert_eq!(client.settlement_count(&merchant), 1);
 }
 
+#[test]
+fn test_transfer_admin_emits_event() {
+    let (env, admin, client) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.transfer_admin(&admin, &new_admin);
+
+    let expected = AdminTransferredEvent {
+        old_admin: admin.clone(),
+        new_admin: new_admin.clone(),
+    };
+
+    let events = env.events().all();
+    let found = events.iter().any(|(contract, topics, data)| {
+        contract == client.address
+            && topics == (Symbol::new(&env, "SETTLEMENT_LEDGER"), Symbol::new(&env, "admin_transferred")).into_val(&env)
+            && data == expected.into_val(&env)
+    });
+    assert!(found, "AdminTransferredEvent not emitted");
+}
+
 // ── immutability: duplicate write must panic ──────────────────────────────────
 
 #[test]
@@ -119,6 +140,31 @@ fn test_void_preserves_original_settlement() {
     client.void_settlement(&admin, &pid(&env, 7), &fiat_ref(&env, "operator correction"));
     assert_eq!(client.get_settlement(&pid(&env, 7)).amount, 1_000);
     assert_eq!(client.get_settlement_void(&pid(&env, 7)).unwrap().reason, fiat_ref(&env, "operator correction"));
+}
+
+#[test]
+fn test_void_settlement_emits_event() {
+    let (env, admin, client) = setup();
+    let merchant = Address::generate(&env);
+    record(&client, &admin, &env, 9, &merchant, 1_000, 20);
+
+    let reason = fiat_ref(&env, "operator correction");
+    client.void_settlement(&admin, &pid(&env, 9), &reason);
+
+    let voided_at = env.ledger().timestamp();
+    let expected = SettlementVoidedEvent {
+        payment_id: pid(&env, 9),
+        reason: reason.clone(),
+        voided_at,
+    };
+
+    let events = env.events().all();
+    let found = events.iter().any(|(contract, topics, data)| {
+        contract == client.address
+            && topics == (Symbol::new(&env, "SETTLEMENT_LEDGER"), Symbol::new(&env, "settlement_voided")).into_val(&env)
+            && data == expected.into_val(&env)
+    });
+    assert!(found, "SettlementVoidedEvent not emitted");
 }
 
 // ── fee + net must equal amount ───────────────────────────────────────────────
@@ -245,19 +291,9 @@ fn test_platform_wide_index_uses_bounded_pages() {
     // Scalar count must be exact.
     assert_eq!(client.total_settlement_count(), 45);
 
-    // Page 0: full page of 20.
-    let page0 = client.list_all_settlements(&0);
-    assert_eq!(page0.len(), 20);
-
-    // Page 1: full page of 20.
-    let page1 = client.list_all_settlements(&1);
-    assert_eq!(page1.len(), 20);
-
-    // Page 2: remaining 5 entries.
-    let page2 = client.list_all_settlements(&2);
-    assert_eq!(page2.len(), 5);
-
-    // Page 3: beyond end — empty.
-    let page3 = client.list_all_settlements(&3);
-    assert_eq!(page3.len(), 0);
+    // Each page must be bounded by PAGE_SIZE.
+    assert_eq!(client.list_all_settlements(&0).len(), 20);
+    assert_eq!(client.list_all_settlements(&1).len(), 20);
+    assert_eq!(client.list_all_settlements(&2).len(), 5);
+    assert_eq!(client.list_all_settlements(&3).len(), 0);
 }
