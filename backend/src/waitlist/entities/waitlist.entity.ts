@@ -1,6 +1,13 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 
-@Entity('waitlist')
+@Entity('waitlist_entries')
 export class WaitlistEntry {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -8,17 +15,8 @@ export class WaitlistEntry {
   @Column({ unique: true })
   email: string;
 
-  @Column({ unique: true, nullable: true })
+  @Column({ unique: true })
   username: string;
-
-  @Column({ nullable: true })
-  businessName: string;
-
-  @Column({ nullable: true })
-  country: string;
-
-  @Column({ default: 0 })
-  referrals: number;
 
   @Column({ nullable: true })
   referralCode: string;
@@ -26,13 +24,12 @@ export class WaitlistEntry {
   @Column({ default: false })
   unsubscribed: boolean;
 
-  /** SHA-256 hash of the unsubscribe token; raw token is sent in email and never persisted */
   @Column({ nullable: true })
-  unsubscribeTokenHash: string;
-
-  @Column({ default: false })
-  notified: boolean;
+  unsubscribeToken: string;
 
   @CreateDateColumn()
   createdAt: Date;
+
+  @UpdateDateColumn()
+  updatedAt: Date;
 }
