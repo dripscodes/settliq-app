@@ -82,3 +82,6 @@ Grafana/Loki/Promtail configs under [`grafana/`](grafana/) and [`docker-compose.
 
 <!-- handsoff-issue-105 -->
 - #105: merchant_registry: register_merchant allows empty business name strings
+
+<!-- handsoff-issue-106 -->
+- #106: merchant_registry: Unbounded page_size parameter in merchants query risks gas budget exhaustion
