@@ -135,9 +135,10 @@ impl StellarConfirmationsContract {
     /// `amount` and `merchant` are forwarded into the SettlementAuthorised event
     /// so NestJS can trigger the fiat payout without a second lookup. When a
     /// payment_escrow contract has been configured via
-    /// `set_payment_escrow_contract`, the final threshold-crossing call
-    /// cross-checks `amount`/`merchant` against `payment_escrow::get_payment`
-    /// and panics on a mismatch rather than trusting the caller blindly.
+    /// `set_payment_escrow_contract`, every call cross-checks `amount`/`merchant`
+    /// against `payment_escrow::get_payment` and panics on a mismatch rather than
+    /// trusting the caller blindly. The cross-contract lookup is performed at
+    /// most once per invocation (issue #108).
     ///
     /// Returns the current confirmation count after this call.
     pub fn confirm_payment(
@@ -156,6 +157,10 @@ impl StellarConfirmationsContract {
         // `payment_id` before recording this confirmation. This closes the gap
         // where a compromised/malfunctioning monitor could fabricate
         // confirmation/settlement events for arbitrary amount/merchant values.
+        //
+        // This is the single cross-contract lookup for the whole invocation;
+        // the threshold-crossing branch below reuses this verification rather
+        // than issuing a second identical `get_payment` call (issue #108).
         if let Some(escrow_address) = env
             .storage()
             .instance()

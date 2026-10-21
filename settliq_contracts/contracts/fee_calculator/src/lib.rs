@@ -340,7 +340,10 @@ impl FeeCalculatorContract {
                 panic!("threshold must be >= 0");
             }
             if tier.threshold_usdc <= prev_threshold {
-                panic!("thresholds must be strictly increasing");
+                panic!("thresholds must be strictly ascending");
+            }
+            if tier.fee_bps > BPS_DENOMINATOR as u32 {
+                panic!("fee_bps must be <= 10000");
             }
             if tier.fee_bps > prev_bps {
                 panic!("fee_bps must be non-increasing");
@@ -367,6 +370,7 @@ impl FeeCalculatorContract {
     fn update_and_get_volume(env: &Env, merchant: &Address, amount: i128) -> i128 {
         let current_ledger = env.ledger().sequence();
         let key = DataKey::MerchantVolume(merchant.clone());
+
         let mut data = env
             .storage()
             .persistent()
