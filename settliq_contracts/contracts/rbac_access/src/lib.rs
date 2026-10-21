@@ -181,10 +181,10 @@ impl RbacAccessContract {
         env.storage().persistent().get(&DataKey::Role(account))
     }
 
-    /// Sensitive operation requiring minimum `OperationsAdmin`.
+    /// Sensitive operation requiring `OperationsAdmin` (or `SuperAdmin`).
     ///
     /// Reference implementation of the role-gating pattern: it enforces
-    /// `require_auth()` plus the minimum role and performs no business logic.
+    /// `require_auth()` plus the required role and performs no business logic.
     /// There is intentionally no state mutation or event emission -- integrators
     /// should model real sensitive operations on this pattern and add their own
     /// logic after the gate.
@@ -193,10 +193,10 @@ impl RbacAccessContract {
         Self::require_role(&env, &caller, Role::OperationsAdmin);
     }
 
-    /// Sensitive operation requiring minimum `ComplianceAdmin`.
+    /// Sensitive operation requiring `ComplianceAdmin` (or `SuperAdmin`).
     ///
     /// Reference implementation of the role-gating pattern: it enforces
-    /// `require_auth()` plus the minimum role and performs no business logic.
+    /// `require_auth()` plus the required role and performs no business logic.
     /// There is intentionally no state mutation or event emission -- integrators
     /// should model real sensitive operations on this pattern and add their own
     /// logic after the gate.
@@ -205,10 +205,10 @@ impl RbacAccessContract {
         Self::require_role(&env, &caller, Role::ComplianceAdmin);
     }
 
-    /// Sensitive operation requiring minimum `ReadOnly`.
+    /// Sensitive operation requiring `ReadOnly` (or any higher role).
     ///
     /// Reference implementation of the role-gating pattern: it enforces
-    /// `require_auth()` plus the minimum role and performs no business logic.
+    /// `require_auth()` plus the required role and performs no business logic.
     /// There is intentionally no state mutation or event emission -- integrators
     /// should model real sensitive operations on this pattern and add their own
     /// logic after the gate.
@@ -243,25 +243,40 @@ impl RbacAccessContract {
         );
     }
 
-    fn require_role(env: &Env, caller: &Address, minimum_role: Role) {
-        // Issue #1026: Use persistent() instead of instance()
-        let caller_role = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Role>(&DataKey::Role(caller.clone()))
-            .expect("role not assigned");
+    // ── Internal helpers ────────────────────────────────────────────────────
 
-        if Self::role_rank(caller_role) < Self::role_rank(minimum_role) {
-            panic!("insufficient role");
+    /// Returns true if `caller_role` is authorized to perform a task that
+    /// requires `required`.
+    ///
+    /// Issue #93: Compliance and Operations are distinct functional roles and
+    /// must NOT be interchangeable. We therefore no longer use a linear scalar
+    /// rank comparison (which let `OperationsAdmin` satisfy a
+    /// `ComplianceAdmin` requirement). Instead:
+    ///   - `SuperAdmin` satisfies every requirement.
+    ///   - `ReadOnly` is the lowest tier and is satisfied by any assigned role.
+    ///   - `ComplianceAdmin` and `OperationsAdmin` are only satisfied by an
+    ///     exact role match (or `SuperAdmin`).
+    fn role_satisfies(caller_role: &Role, required: &Role) -> bool {
+        if *caller_role == Role::SuperAdmin {
+            return true;
+        }
+        match required {
+            Role::SuperAdmin => false,
+            Role::ReadOnly => true,
+            Role::ComplianceAdmin => *caller_role == Role::ComplianceAdmin,
+            Role::OperationsAdmin => *caller_role == Role::OperationsAdmin,
         }
     }
 
-    fn role_rank(role: Role) -> u32 {
-        match role {
-            Role::ReadOnly => 1,
-            Role::ComplianceAdmin => 2,
-            Role::OperationsAdmin => 3,
-            Role::SuperAdmin => 4,
+    fn require_role(env: &Env, caller: &Address, required: Role) {
+        let caller_role: Role = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Role(caller.clone()))
+            .expect("caller has no assigned role");
+
+        if !Self::role_satisfies(&caller_role, &required) {
+            panic!("unauthorized: insufficient role");
         }
     }
 }
