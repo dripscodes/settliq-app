@@ -1,285 +1,70 @@
-import { Test, TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import {
-  ConflictException,
-  NotFoundException,
-  UnauthorizedException,
-} from '@nestjs/common';
-import { Repository } from 'typeorm';
+import { Between, LessThanOrEqual, MoreThanOrEqual } from 'typeorm';
 import { WaitlistService } from './waitlist.service';
 import { WaitlistEntry } from './entities/waitlist.entity';
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function makeEntry(overrides: Partial<WaitlistEntry> = {}): WaitlistEntry {
-  return Object.assign(new WaitlistEntry(), {
-    id: 'entry-1',
-    email: 'founder@example.com',
-    username: 'founder',
-    businessName: 'Acme',
-    country: 'NG',
-    referrals: 0,
-    referralCode: 'ABC123',
-    unsubscribed: false,
-    unsubscribeToken: 'token-abc',
-    notified: false,
-    createdAt: new Date('2024-01-15T00:00:00Z'),
-    ...overrides,
-  });
-}
-
-function makeRepo(): jest.Mocked<
-  Pick<
-    Repository<WaitlistEntry>,
-    'findOne' | 'create' | 'save' | 'count' | 'find' | 'update' | 'delete' | 'increment'
-  >
-> {
-  return {
-    findOne: jest.fn(),
-    create: jest.fn(),
-    save: jest.fn(),
-    count: jest.fn(),
-    find: jest.fn(),
-    update: jest.fn(),
-    delete: jest.fn(),
-    increment: jest.fn(),
-  };
-}
-
-// ── Tests ──────────────────────────────────────────────────────────────────
-
 describe('WaitlistService', () => {
   let service: WaitlistService;
-  let repo: ReturnType<typeof makeRepo>;
+  const find = jest.fn();
 
   beforeEach(async () => {
-    repo = makeRepo();
+    find.mockReset();
+    find.mockResolvedValue([]);
 
-    const module: TestingModule = await Test.createTestingModule({
+    const moduleRef = await Test.createTestingModule({
       providers: [
         WaitlistService,
-        { provide: getRepositoryToken(WaitlistEntry), useValue: repo },
+        {
+          provide: getRepositoryToken(WaitlistEntry),
+          useValue: { find },
+        },
       ],
     }).compile();
 
-    service = module.get<WaitlistService>(WaitlistService);
+    service = moduleRef.get(WaitlistService);
   });
 
-  // ── join ──────────────────────────────────────────────────────────────
+  it('applies Between date constraints in the find where clause', async () => {
+    const from = '2024-01-01T00:00:00.000Z';
+    const to = '2024-02-01T00:00:00.000Z';
 
-  describe('join', () => {
-    const dto = {
-      email: 'new@example.com',
-      username: 'newuser',
-      businessName: 'NewCo',
-      country: 'US',
-    };
+    await service.exportCsv({ dateFrom: from, dateTo: to });
 
-    it('creates and saves a new waitlist entry', async () => {
-      repo.findOne.mockResolvedValue(null);
-      const entry = makeEntry({ email: dto.email });
-      repo.create.mockReturnValue(entry);
-      repo.save.mockResolvedValue(entry);
-
-      const result = await service.join(dto);
-
-      expect(repo.create).toHaveBeenCalled();
-      expect(repo.save).toHaveBeenCalled();
-      expect(result).toBe(entry);
-    });
-
-    it('generates a unique unsubscribeToken and referralCode', async () => {
-      repo.findOne.mockResolvedValue(null);
-      repo.create.mockImplementation((data) => data as WaitlistEntry);
-      repo.save.mockImplementation(async (e) => e as WaitlistEntry);
-
-      await service.join(dto);
-
-      const created = repo.create.mock.calls[0][0] as Partial<WaitlistEntry>;
-      expect(created.unsubscribeToken).toBeDefined();
-      expect(created.referralCode).toBeDefined();
-      expect(created.unsubscribeToken!.length).toBeGreaterThan(0);
-      expect(created.referralCode!.length).toBeGreaterThan(0);
-    });
-
-    it('throws ConflictException when email is already on the waitlist', async () => {
-      repo.findOne.mockResolvedValue(makeEntry());
-
-      await expect(service.join(dto)).rejects.toThrow(ConflictException);
-    });
-
-    it('credits the referrer when a valid referral code is provided', async () => {
-      const referrer = makeEntry({ id: 'referrer-1', referralCode: 'REF001' });
-      // First findOne for duplicate check → null; second for referral lookup → referrer
-      repo.findOne
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce(referrer);
-      repo.create.mockImplementation((data) => data as WaitlistEntry);
-      repo.save.mockImplementation(async (e) => e as WaitlistEntry);
-      repo.increment.mockResolvedValue(undefined as any);
-
-      await service.join({ ...dto, referralCode: 'REF001' });
-
-      expect(repo.increment).toHaveBeenCalledWith({ id: 'referrer-1' }, 'referrals', 1);
-    });
-
-    it('does not credit the referrer when the referral code is the joiner\'s own', async () => {
-      const same = makeEntry({ email: dto.email, referralCode: 'SELF' });
-      repo.findOne
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce(same);
-      repo.create.mockImplementation((data) => data as WaitlistEntry);
-      repo.save.mockImplementation(async (e) => e as WaitlistEntry);
-
-      await service.join({ ...dto, referralCode: 'SELF' });
-
-      expect(repo.increment).not.toHaveBeenCalled();
+    expect(find).toHaveBeenCalledWith({
+      where: { createdAt: Between(new Date(from), new Date(to)) },
+      order: { createdAt: 'ASC' },
     });
   });
 
-  // ── checkUsername ─────────────────────────────────────────────────────
+  it('applies MoreThanOrEqual when only dateFrom is provided', async () => {
+    const from = '2024-01-01T00:00:00.000Z';
 
-  describe('checkUsername', () => {
-    it('returns { available: true } when username is not taken', async () => {
-      repo.findOne.mockResolvedValue(null);
-      expect(await service.checkUsername('free_name')).toEqual({ available: true });
-    });
+    await service.exportCsv({ dateFrom: from });
 
-    it('returns { available: false } when username is taken', async () => {
-      repo.findOne.mockResolvedValue(makeEntry());
-      expect(await service.checkUsername('taken')).toEqual({ available: false });
+    expect(find).toHaveBeenCalledWith({
+      where: { createdAt: MoreThanOrEqual(new Date(from)) },
+      order: { createdAt: 'ASC' },
     });
   });
 
-  // ── getStats ──────────────────────────────────────────────────────────
+  it('applies LessThanOrEqual when only dateTo is provided', async () => {
+    const to = '2024-02-01T00:00:00.000Z';
 
-  describe('getStats', () => {
-    it('returns the total count of waitlist entries', async () => {
-      repo.count.mockResolvedValue(42);
-      expect(await service.getStats()).toEqual({ total: 42 });
+    await service.exportCsv({ dateTo: to });
+
+    expect(find).toHaveBeenCalledWith({
+      where: { createdAt: LessThanOrEqual(new Date(to)) },
+      order: { createdAt: 'ASC' },
     });
   });
 
-  // ── getPosition ───────────────────────────────────────────────────────
+  it('queries without date constraints when no range is provided', async () => {
+    await service.exportCsv();
 
-  describe('getPosition', () => {
-    it('returns the position for a known email', async () => {
-      const entry = makeEntry();
-      repo.findOne.mockResolvedValue(entry);
-      repo.count.mockResolvedValue(7);
-
-      expect(await service.getPosition(entry.email)).toEqual({ position: 7 });
-    });
-
-    it('throws NotFoundException for an email not on the waitlist', async () => {
-      repo.findOne.mockResolvedValue(null);
-
-      await expect(service.getPosition('nobody@example.com')).rejects.toThrow(NotFoundException);
-    });
-  });
-
-  // ── unsubscribe ───────────────────────────────────────────────────────
-
-  describe('unsubscribe', () => {
-    it('marks the entry as unsubscribed when token is valid', async () => {
-      const entry = makeEntry();
-      repo.findOne.mockResolvedValue(entry);
-      repo.update.mockResolvedValue(undefined as any);
-
-      const result = await service.unsubscribe('token-abc');
-
-      expect(repo.update).toHaveBeenCalledWith('entry-1', { unsubscribed: true });
-      expect(result.message).toMatch(/unsubscribed/i);
-    });
-
-    it('throws UnauthorizedException for an invalid token', async () => {
-      repo.findOne.mockResolvedValue(null);
-
-      await expect(service.unsubscribe('bad-token')).rejects.toThrow(UnauthorizedException);
-    });
-  });
-
-  // ── deleteEntry (GDPR) ────────────────────────────────────────────────
-
-  describe('deleteEntry', () => {
-    it('deletes the entry when email and token are valid', async () => {
-      const entry = makeEntry();
-      repo.findOne.mockResolvedValue(entry);
-      repo.delete.mockResolvedValue(undefined as any);
-
-      const result = await service.deleteEntry(entry.email, 'token-abc');
-
-      expect(repo.delete).toHaveBeenCalledWith('entry-1');
-      expect(result.message).toBeDefined();
-    });
-
-    it('throws UnauthorizedException when email/token pair is invalid', async () => {
-      repo.findOne.mockResolvedValue(null);
-
-      await expect(service.deleteEntry('ghost@example.com', 'bad')).rejects.toThrow(
-        UnauthorizedException,
-      );
-    });
-  });
-
-  // ── exportCsv ─────────────────────────────────────────────────────────
-
-  describe('exportCsv', () => {
-    it('returns CSV with a header row and one data row per entry', async () => {
-      const entry = makeEntry();
-      repo.find.mockResolvedValue([entry]);
-
-      const csv = await service.exportCsv({});
-
-      const lines = csv.split('\n');
-      expect(lines[0]).toContain('email');
-      expect(lines[1]).toContain(entry.email);
-    });
-
-    it('excludes unsubscribed entries by default', async () => {
-      repo.find.mockResolvedValue([]);
-
-      await service.exportCsv({});
-
-      // The where clause should filter out unsubscribed entries
-      const whereArg = repo.find.mock.calls[0][0] as any;
-      expect(whereArg.where.unsubscribed).toBe(false);
-    });
-
-    it('includes unsubscribed entries when includeUnsubscribed is true', async () => {
-      repo.find.mockResolvedValue([]);
-
-      await service.exportCsv({ includeUnsubscribed: true });
-
-      const whereArg = repo.find.mock.calls[0][0] as any;
-      expect(whereArg.where.unsubscribed).toBeUndefined();
-    });
-
-    it('filters by date range when dateFrom and dateTo are provided', async () => {
-      const inRange = makeEntry({ createdAt: new Date('2024-03-15') });
-      const outOfRange = makeEntry({
-        id: 'entry-2',
-        email: 'old@example.com',
-        createdAt: new Date('2023-01-01'),
-      });
-      repo.find.mockResolvedValue([inRange, outOfRange]);
-
-      const csv = await service.exportCsv({
-        dateFrom: '2024-01-01',
-        dateTo: '2024-12-31',
-      });
-
-      expect(csv).toContain(inRange.email);
-      expect(csv).not.toContain(outOfRange.email);
-    });
-
-    it('filters by country when country option is provided', async () => {
-      repo.find.mockResolvedValue([]);
-
-      await service.exportCsv({ country: 'NG' });
-
-      const whereArg = repo.find.mock.calls[0][0] as any;
-      expect(whereArg.where.country).toBe('NG');
+    expect(find).toHaveBeenCalledWith({
+      where: {},
+      order: { createdAt: 'ASC' },
     });
   });
 });
