@@ -3,6 +3,7 @@ import {
   UnauthorizedException,
   ConflictException,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -23,6 +24,9 @@ const API_KEY_BYTES = 32;
 
 /** Prefix applied to generated API keys for easy identification. */
 const API_KEY_PREFIX = 'sk_live_';
+
+/** Lifetime of a password reset token: 1 hour. */
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 
 /** Result of generating or rotating an API key. The plaintext key is only returned once. */
 export interface GeneratedApiKey {
@@ -66,6 +70,56 @@ export class AuthService {
     if (!valid) throw new UnauthorizedException('Invalid credentials');
 
     return this.issueTokenPair(merchant);
+  }
+
+  /**
+   * Begin the password reset flow.
+   *
+   * Generates a cryptographically random, time-limited reset token and persists
+   * it on the merchant. To avoid account enumeration, an unknown email is a
+   * silent no-op. The plaintext token is returned so the caller (email sender)
+   * can deliver it; it is never stored in plaintext.
+   */
+  async forgotPassword(email: string): Promise<{ resetToken: string | null }> {
+    const merchant = await this.merchantsRepo.findOne({ where: { email } });
+    if (!merchant) {
+      return { resetToken: null };
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    merchant.passwordResetToken = this.hashToken(resetToken);
+    merchant.passwordResetExpiry = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+    await this.merchantsRepo.save(merchant);
+
+    return { resetToken };
+  }
+
+  /**
+   * Complete the password reset flow.
+   *
+   * Validates the reset token against the stored hash, rejects missing/expired
+   * tokens with 400 Bad Request, hashes the new password with bcrypt, and
+   * clears the reset token and expiry so it cannot be reused.
+   */
+  async resetPassword(resetToken: string, newPassword: string): Promise<void> {
+    const tokenHash = this.hashToken(resetToken);
+
+    const merchant = await this.merchantsRepo.findOne({
+      where: { passwordResetToken: tokenHash },
+    });
+
+    if (!merchant) {
+      throw new BadRequestException('Invalid or expired password reset token');
+    }
+
+    if (!merchant.passwordResetExpiry || merchant.passwordResetExpiry < new Date()) {
+      throw new BadRequestException('Invalid or expired password reset token');
+    }
+
+    merchant.passwordHash = await bcrypt.hash(newPassword, 12);
+    merchant.passwordResetToken = null;
+    merchant.passwordResetExpiry = null;
+    await this.merchantsRepo.save(merchant);
   }
 
   /**
@@ -226,12 +280,13 @@ export class AuthService {
     return { apiKeyHash, apiKeyLookupHash };
   }
 
-  /** SHA-256 hex digest of a raw token string. */
-  private hashToken(raw: string): string {
-    return crypto.createHash('sha256').update(raw).digest('hex');
+  /** SHA-256 hex digest of an opaque token, used for at-rest storage. */
+  private hashToken(rawToken: string): string {
+    return crypto.createHash('sha256').update(rawToken).digest('hex');
   }
 
-  private signToken(sub: string, email: string, role?: string): string {
-    return this.jwtService.sign({ sub, email, role });
+  /** Sign a short-lived JWT access token for the given merchant. */
+  private signToken(merchantId: string, email: string, role: string): string {
+    return this.jwtService.sign({ sub: merchantId, email, role });
   }
 }

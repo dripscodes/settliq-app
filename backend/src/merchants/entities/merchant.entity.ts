@@ -21,6 +21,12 @@ export class Merchant {
   passwordHash?: string;
 
   @Column({ nullable: true, select: false })
+  passwordResetToken?: string;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  passwordResetExpiry?: Date;
+
+  @Column({ nullable: true, select: false })
   apiKeyHash?: string;
 
   @Column({ nullable: true, select: false })
