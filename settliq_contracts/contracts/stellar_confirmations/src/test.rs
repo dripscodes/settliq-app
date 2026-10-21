@@ -1,11 +1,13 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
-    Address, BytesN, Env,
+    testutils::{Address as _, Events as _, Ledger as _},
+    Address, BytesN, Env, IntoVal, Symbol, TryIntoVal,
 };
 
-use crate::{StellarConfirmationsContract, StellarConfirmationsContractClient};
+use crate::{
+    ConfirmationFailedEvent, StellarConfirmationsContract, StellarConfirmationsContractClient,
+};
 
 fn pid(env: &Env, seed: u8) -> BytesN<32> {
     BytesN::from_array(env, &[seed; 32])
@@ -227,19 +229,66 @@ fn test_regressed_ledger_seq_also_rejected() {
 fn test_cannot_reach_threshold_within_single_ledger() {
     // Issue #16: The entire point of the fix is that the threshold cannot be
     // reached by replaying the same ledger. With required=3 and one ledger,
-    // only 1 confirmation can be recorded, leaving the payment non-settling.
+    // only 1 confirmation can be recorded, leaving the payment unsettled.
     let (env, admin, client) = setup(3);
     let payment_id = pid(&env, 46);
     let merchant = Address::generate(&env);
 
-    // First confirmation succeeds.
+    client.confirm_payment(&admin, &payment_id, &7000, &100_000, &merchant);
+    let _ = client.try_confirm_payment(&admin, &payment_id, &7000, &100_000, &merchant);
+    let _ = client.try_confirm_payment(&admin, &payment_id, &7000, &100_000, &merchant);
+
+    assert_eq!(client.get_payment_confirmations(&payment_id), 1);
+    assert!(!client.is_settling(&payment_id));
+}
+
+// ── Issue #99: fail_confirmation reports snapshotted threshold ───────────────
+
+#[test]
+fn test_fail_confirmation_reports_snapshotted_threshold() {
+    // Issue #99: fail_confirmation must publish the payment's snapshotted
+    // required confirmations, not the current global ConfirmationCount.
+    let (env, admin, client) = setup(5);
+    let payment_id = pid(&env, 99);
+    let merchant = Address::generate(&env);
+
+    // Record 1 confirmation under initial threshold of 5 (snapshots 5).
     client.confirm_payment(&admin, &payment_id, &1001, &100_000, &merchant);
 
-    // Second and third attempts with the same ledger must fail.
-    let _ = client.try_confirm_payment(&admin, &payment_id, &1001, &100_000, &merchant);
-    let _ = client.try_confirm_payment(&admin, &payment_id, &1001, &100_000, &merchant);
+    // Admin raises the global threshold mid-flight.
+    client.set_confirmation_count(&admin, &10);
+    assert_eq!(client.get_confirmation_count(), 10);
 
-    // Payment must not be settling — threshold was never reached.
-    assert!(!client.is_settling(&payment_id));
-    assert_eq!(client.get_payment_confirmations(&payment_id), 1);
+    // Fail the payment and inspect the emitted event.
+    client.fail_confirmation(&admin, &payment_id);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().unwrap();
+    let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(t0, Symbol::new(&env, "STELLAR_CONFS"));
+    assert_eq!(t1, Symbol::new(&env, "confirmation_failed"));
+
+    let event: ConfirmationFailedEvent = data.try_into_val(&env).unwrap();
+    assert_eq!(event.payment_id, payment_id);
+    assert_eq!(event.confirmations, 1);
+    // Snapshotted threshold (5), not the updated global (10).
+    assert_eq!(event.required, 5);
+}
+
+#[test]
+fn test_fail_confirmation_falls_back_to_global_when_no_snapshot() {
+    // Issue #99: when no confirmations were recorded, fall back to the global
+    // ConfirmationCount.
+    let (env, admin, client) = setup(4);
+    let payment_id = pid(&env, 100);
+
+    client.fail_confirmation(&admin, &payment_id);
+
+    let events = env.events().all();
+    let (_, _topics, data) = events.last().unwrap();
+    let event: ConfirmationFailedEvent = data.try_into_val(&env).unwrap();
+    assert_eq!(event.payment_id, payment_id);
+    assert_eq!(event.confirmations, 0);
+    assert_eq!(event.required, 4);
 }
