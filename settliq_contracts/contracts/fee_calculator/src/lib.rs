@@ -261,6 +261,13 @@ impl FeeCalculatorContract {
             panic!("tiers must not be empty");
         }
 
+        // First tier must start at zero to ensure all merchants (even with $0 volume)
+        // have an explicit tier assignment, preventing ambiguous fallback behavior
+        let first_tier = tiers.get(0).unwrap();
+        if first_tier.threshold_usdc != 0 {
+            panic!("first tier must have threshold_usdc == 0");
+        }
+
         let mut prev_threshold = -1;
         let mut prev_bps = u32::MAX;
 

@@ -35,6 +35,13 @@ pub struct PairMaxSlippageUpdatedEvent {
     pub new_bps: u32,
 }
 
+#[contracttype]
+pub struct PairMaxSlippageRemovedEvent {
+    pub asset_a: Address,
+    pub asset_b: Address,
+    pub removed_bps: u32,
+}
+
 #[contract]
 pub struct SlippageProtectionContract;
 
@@ -131,6 +138,39 @@ impl SlippageProtectionContract {
                 new_bps: bps,
             },
         );
+    }
+
+    /// Admin-only: remove a per-pair slippage override to restore the pair to the global default.
+    /// Returns the slippage bps value that was removed, or panics if no override exists.
+    pub fn remove_pair_max_slippage(
+        env: Env,
+        caller: soroban_sdk::Address,
+        asset_a: soroban_sdk::Address,
+        asset_b: soroban_sdk::Address,
+    ) -> u32 {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+        let (k1, k2) = Self::canonical_pair(&env, asset_a.clone(), asset_b.clone());
+
+        let key = DataKey::PairMaxSlippageBps(k1, k2);
+        let removed_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&key)
+            .expect("no pair max slippage override exists");
+
+        env.storage().instance().remove(&key);
+
+        env.events().publish(
+            ("SLIPPAGE", "pair_max_slippage_removed"),
+            PairMaxSlippageRemovedEvent {
+                asset_a,
+                asset_b,
+                removed_bps,
+            },
+        );
+
+        removed_bps
     }
 
     pub fn get_max_slippage(env: Env) -> u32 {
