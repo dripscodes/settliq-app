@@ -198,6 +198,9 @@ impl SlippageProtectionContract {
         if expected <= 0 {
             panic!("expected must be > 0");
         }
+        if actual <= 0 {
+            panic!("actual must be > 0");
+        }
 
         // deviation_bps = abs(expected - actual) * 10_000 / expected
         let diff = if actual >= expected {
