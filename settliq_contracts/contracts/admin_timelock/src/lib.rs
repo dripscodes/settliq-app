@@ -347,8 +347,13 @@ impl AdminTimelockContract {
         }
     }
 
+    /// Remove `change_id` from the pending list in place.
+    ///
+    /// Locates the target index via `first_index_of` and removes it with
+    /// `Vec::remove`, mutating the existing vector rather than allocating a
+    /// second full copy of the list.
     fn remove_from_pending(env: &Env, change_id: &BytesN<32>) {
-        let pending: Vec<BytesN<32>> = env
+        let mut pending: Vec<BytesN<32>> = env
             .storage()
             .instance()
             .get(&DataKey::PendingList)
@@ -359,8 +364,5 @@ impl AdminTimelockContract {
                 updated.push_back(id);
             }
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingList, &updated);
     }
 }

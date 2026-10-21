@@ -5,7 +5,9 @@ use soroban_sdk::{
     Address, BytesN, Env, IntoVal, Symbol, TryFromVal,
 };
 
-use crate::{StellarConfirmationsContract, StellarConfirmationsContractClient};
+use crate::{
+    ConfirmationFailedEvent, StellarConfirmationsContract, StellarConfirmationsContractClient,
+};
 
 fn pid(env: &Env, seed: u8) -> BytesN<32> {
     BytesN::from_array(env, &[seed; 32])

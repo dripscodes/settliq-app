@@ -46,6 +46,14 @@ fn test_admin_can_submit_merkle_root_and_store_batch() {
 }
 
 #[test]
+#[should_panic(expected = "merkle root must not be zero")]
+fn test_submit_zero_merkle_root_panics() {
+    let (env, client, admin) = setup_env();
+    let zero_root = BytesN::from_array(&env, &[0u8; 32]);
+    client.submit_merkle_root(&admin, &zero_root);
+}
+
+#[test]
 fn test_verify_settlement_valid_proof_returns_no_mismatch() {
     let (env, client, admin) = setup_env();
     let payment_a = make_id(&env, 10);
