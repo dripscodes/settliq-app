@@ -86,9 +86,19 @@ impl ReconciliationContract {
     /// and shares one TTL, so a growing history stored there would eventually
     /// stop the contract from functioning. The `CurrentBatch` pointer stays in
     /// instance storage, where it already was.
+    ///
+    /// # Panics
+    ///
+    /// If `merkle_root` is all-zero. A null root is never a valid
+    /// reconciliation result and would otherwise record an empty batch
+    /// on-chain.
     pub fn submit_merkle_root(env: Env, caller: Address, merkle_root: BytesN<32>) -> u32 {
         caller.require_auth();
         Self::require_admin(&env, &caller);
+
+        if merkle_root == BytesN::from_array(&env, &[0u8; 32]) {
+            panic!("merkle root must not be zero");
+        }
 
         let batch = ReconciliationBatch {
             merkle_root: merkle_root.clone(),
@@ -219,73 +229,39 @@ impl ReconciliationContract {
         archived
     }
 
-    /// Walks `proof` up from the leaf for `payment_id` and returns the root it
-    /// computes. Shared by both verifiers so they cannot drift apart.
-    fn latest_batch_id(env: &Env) -> Option<u32> {
-        let next_id: u32 = env.storage().instance().get(&DataKey::NextBatchId)?;
-        next_id.checked_sub(1)
+    fn require_admin(env: &Env, caller: &Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != &admin {
+            panic!("caller is not admin");
+        }
     }
 
-    fn compute_root(
-        env: &Env,
-        payment_id: &BytesN<32>,
-        proof: &Vec<MerkleProofNode>,
-    ) -> BytesN<32> {
-        let mut current = Self::hash_leaf(env, payment_id);
-        for i in 0..proof.len() {
-            let node = proof.get(i).unwrap();
-            current = if node.is_left {
-                Self::hash_pair(env, &node.sibling, &current)
-            } else {
-                Self::hash_pair(env, &current, &node.sibling)
-            };
-        }
-        current
+    fn latest_batch_id(env: &Env) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::NextBatchId)
+            .map(|next| next - 1)
     }
 
     fn require_proof_depth(proof: &Vec<MerkleProofNode>) {
-        if proof.len() > MAX_PROOF_DEPTH { panic!("proof too long"); }
-    }
-
-    fn require_admin(env: &Env, caller: &Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        if &admin != caller {
-            panic!("Not admin");
+        if proof.len() > MAX_PROOF_DEPTH {
+            panic!("proof depth exceeds maximum");
         }
     }
 
-    /// Hash a leaf node following RFC 6962 domain separation.
-    ///
-    /// A `0x00` prefix byte is prepended to the payment ID before hashing so
-    /// that leaf hashes can never collide with internal node hashes (which use
-    /// `0x01`).  Without this separation an attacker could supply a 64-byte
-    /// concatenation of two sibling hashes as a "leaf", producing a hash
-    /// identical to an internal node and forging a valid Merkle proof for a
-    /// payment ID that was never settled (second-preimage attack).
-    pub(crate) fn hash_leaf(env: &Env, payment_id: &BytesN<32>) -> BytesN<32> {
-        let id_arr = payment_id.to_array();
-        // 0x00 || payment_id  (33 bytes total)
-        let mut prefixed = [0u8; 33];
-        prefixed[0] = 0x00;
-        prefixed[1..].copy_from_slice(&id_arr);
-        env.crypto().sha256(&Bytes::from_slice(env, &prefixed)).into()
-    }
-
-    /// Hash an internal node following RFC 6962 domain separation.
-    ///
-    /// A `0x01` prefix byte is prepended to `left || right` before hashing so
-    /// that internal node hashes can never collide with leaf hashes (which use
-    /// `0x00`).
-    pub(crate) fn hash_pair(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
-        let left_arr = left.to_array();
-        let right_arr = right.to_array();
-
-        // 0x01 || left || right  (65 bytes total)
-        let mut combined = [0u8; 65];
-        combined[0] = 0x01;
-        combined[1..33].copy_from_slice(&left_arr);
-        combined[33..].copy_from_slice(&right_arr);
-
-        env.crypto().sha256(&Bytes::from_slice(env, &combined)).into()
+    fn compute_root(env: &Env, payment_id: &BytesN<32>, proof: &Vec<MerkleProofNode>) -> BytesN<32> {
+        let mut current = payment_id.clone();
+        for node in proof.iter() {
+            let mut buf = Bytes::new(env);
+            if node.is_left {
+                buf.append(&Bytes::from(node.sibling.clone()));
+                buf.append(&Bytes::from(current.clone()));
+            } else {
+                buf.append(&Bytes::from(current.clone()));
+                buf.append(&Bytes::from(node.sibling.clone()));
+            }
+            current = env.crypto().sha256(&buf).to_bytes();
+        }
+        current
     }
 }
