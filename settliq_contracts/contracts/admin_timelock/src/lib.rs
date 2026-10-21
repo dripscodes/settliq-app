@@ -99,6 +99,11 @@ struct ChangeCancelledEvent {
 }
 
 #[contracttype]
+struct ChangePrunedEvent {
+    change_id: BytesN<32>,
+}
+
+#[contracttype]
 struct AdminRotatedEvent {
     old_admin: Address,
     new_admin: Address,
@@ -287,8 +292,9 @@ impl AdminTimelockContract {
         );
     }
 
-    /// Remove a completed (Applied or Cancelled) change from persistent storage.
-    /// Admin-only to prevent griefing. Only non-Pending changes may be pruned.
+    /// Remove a terminal (Applied or Cancelled) change record from persistent
+    /// storage. Emits `change_pruned` so indexers can distinguish a deleted
+    /// change from one that never existed.
     pub fn prune_change(env: Env, caller: Address, change_id: BytesN<32>) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
@@ -299,123 +305,17 @@ impl AdminTimelockContract {
             panic!("Cannot prune a pending change");
         }
 
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Change(change_id));
-    }
-
-    /// Propose a timelocked admin rotation. The current admin schedules a
-    /// pending rotation subject to at least `MIN_DELAY_LEDGERS` delay, matching
-    /// the same minimum enforced by `schedule_change` (#9).
-    ///
-    /// The rotation does not take effect until the current admin calls
-    /// `accept_rotate_admin` after the delay has elapsed. The pending rotation
-    /// may be cancelled at any time before acceptance by calling
-    /// `cancel_rotate_admin`.
-    pub fn propose_rotate_admin(
-        env: Env,
-        caller: Address,
-        new_admin: Address,
-        delay_ledgers: u32,
-    ) {
-        caller.require_auth();
-        Self::require_admin(&env, &caller);
-
-        if delay_ledgers < MIN_DELAY_LEDGERS {
-            panic!("delay_ledgers must be >= 17280 (24 h)");
-        }
-
-        let now = env.ledger().sequence();
-        let execute_after = now.saturating_add(delay_ledgers);
-
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingAdmin, &new_admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingAdminExecuteAfter, &execute_after);
+        env.storage().persistent().remove(&DataKey::Change(change_id.clone()));
 
         env.events().publish(
-            ("TIMELOCK", "admin_rotation_proposed"),
-            AdminRotationProposedEvent {
-                current_admin: caller,
-                pending_admin: new_admin,
-                execute_after,
+            ("TIMELOCK", "change_pruned"),
+            ChangePrunedEvent {
+                change_id: change_id.clone(),
             },
         );
     }
 
-    /// Complete a pending admin rotation after the delay has elapsed.
-    /// Only the current admin may call this, ensuring the rotation cannot be
-    /// forced by a third party (#9).
-    pub fn accept_rotate_admin(env: Env, caller: Address) {
-        caller.require_auth();
-        Self::require_admin(&env, &caller);
-
-        let new_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingAdmin)
-            .expect("No pending admin rotation");
-
-        let execute_after: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingAdminExecuteAfter)
-            .expect("No pending admin rotation");
-
-        if env.ledger().sequence() < execute_after {
-            panic!("Delay period has not elapsed");
-        }
-
-        let old_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingAdminExecuteAfter);
-
-        env.events().publish(
-            ("TIMELOCK", "admin_rotated"),
-            AdminRotatedEvent { old_admin, new_admin },
-        );
-    }
-
-    /// Cancel a pending admin rotation before it is accepted.
-    /// Only the current admin may cancel (#9).
-    pub fn cancel_rotate_admin(env: Env, caller: Address) {
-        caller.require_auth();
-        Self::require_admin(&env, &caller);
-
-        let pending: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingAdmin)
-            .expect("No pending admin rotation");
-
-        env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingAdminExecuteAfter);
-
-        env.events().publish(
-            ("TIMELOCK", "admin_rotation_cancelled"),
-            AdminRotationCancelledEvent {
-                pending_admin: pending,
-            },
-        );
-    }
-
-    /// Return the pending admin address if a rotation has been proposed.
-    pub fn get_pending_admin(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::PendingAdmin)
-    }
-
-    // ------------------------------------------------------------------
-    // Queries
-    // ------------------------------------------------------------------
-
+    /// Return the stored change record, panicking if it does not exist.
     pub fn get_change(env: Env, change_id: BytesN<32>) -> ScheduledChange {
         env.storage()
             .persistent()
@@ -423,26 +323,27 @@ impl AdminTimelockContract {
             .expect("Change not found")
     }
 
-    pub fn get_admin(env: Env) -> Address {
-        env.storage().instance().get(&DataKey::Admin).unwrap()
-    }
-
-    /// Return the IDs of all currently pending changes.
-    pub fn list_pending(env: Env) -> Vec<BytesN<32>> {
+    /// Return the list of pending change ids.
+    pub fn get_pending(env: Env) -> Vec<BytesN<32>> {
         env.storage()
             .instance()
             .get(&DataKey::PendingList)
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
+    /// Return the current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Admin).unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
 
     fn require_admin(env: &Env, caller: &Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        if caller != &admin {
-            panic!("Not admin");
+        if &admin != caller {
+            panic!("Caller is not admin");
         }
     }
 
@@ -452,7 +353,6 @@ impl AdminTimelockContract {
             .instance()
             .get(&DataKey::PendingList)
             .unwrap_or_else(|| Vec::new(env));
-
         let mut updated = Vec::new(env);
         for id in pending.iter() {
             if &id != change_id {

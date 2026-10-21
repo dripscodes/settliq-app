@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use crate::{FeeCalculatorContract, FeeCalculatorContractClient, FeeTier, FeeTiersUpdatedEvent};
+use crate::{
+    FeeCalculatorContract, FeeCalculatorContractClient, FeeTier, FeeTiersUpdatedEvent,
+    MinFeeUpdatedEvent, SettlementCallerUpdatedEvent,
+};
 use soroban_sdk::{testutils::{Address as _, Events as _, Ledger}, vec, Address, Env, IntoVal};
 
 fn setup_env() -> (
@@ -187,6 +190,53 @@ fn test_set_fee_tiers_emits_fee_tiers_updated_event() {
     let events = env.events().all();
     let last = events.last().unwrap();
     assert_eq!(last.0, client.address);
+}
+
+#[test]
+fn test_set_settlement_caller_emits_event() {
+    let (env, client, admin, _merchant, _settlement) = setup_env();
+    let new_settlement = Address::generate(&env);
+
+    client.set_settlement_caller(&admin, &new_settlement);
+
+    let expected = SettlementCallerUpdatedEvent {
+        caller: admin.clone(),
+        settlement_caller: new_settlement.clone(),
+    };
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    assert_eq!(last.0, client.address);
+    assert_eq!(
+        last.1,
+        (soroban_sdk::symbol_short!("settle_caller"),).into_val(&env)
+    );
+    assert_eq!(last.2, expected.into_val(&env));
+}
+
+#[test]
+fn test_set_min_fee_stroops_emits_event() {
+    let (env, client, admin, _merchant, _s) = setup_env();
+
+    let old_min_fee = client.get_min_fee_stroops();
+    let new_min_fee = 5;
+
+    client.set_min_fee_stroops(&admin, &new_min_fee);
+
+    let expected = MinFeeUpdatedEvent {
+        caller: admin.clone(),
+        old_min_fee,
+        new_min_fee,
+    };
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    assert_eq!(last.0, client.address);
+    assert_eq!(
+        last.1,
+        (soroban_sdk::symbol_short!("min_fee"),).into_val(&env)
+    );
+    assert_eq!(last.2, expected.into_val(&env));
 }
 
 #[test]
