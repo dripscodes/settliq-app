@@ -64,6 +64,13 @@ struct SettlementRecordedEvent {
     fiat_ref: String,
 }
 
+#[contracttype]
+struct SettlementVoidedEvent {
+    payment_id: BytesN<32>,
+    reason: String,
+    voided_at: u64,
+}
+
 // ── contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -208,87 +215,30 @@ impl SettlementLedgerContract {
 
         let key = DataKey::Void(payment_id.clone());
         assert!(!env.storage().persistent().has(&key), "settlement already voided");
-        env.storage().persistent().set(&key, &SettlementVoid { payment_id, reason, voided_at: env.ledger().timestamp() });
+        let voided_at = env.ledger().timestamp();
+        env.storage().persistent().set(&key, &SettlementVoid { payment_id: payment_id.clone(), reason: reason.clone(), voided_at });
+
+        env.events().publish(
+            ("SETTLEMENT_LEDGER", "settlement_voided"),
+            SettlementVoidedEvent {
+                payment_id,
+                reason,
+                voided_at,
+            },
+        );
     }
 
     /// Returns the void marker for a settlement, if it was corrected.
-    pub fn get_settlement_void(env: Env, payment_id: BytesN<32>) -> Option<SettlementVoid> {
+    pub fn get_void(env: Env, payment_id: BytesN<32>) -> Option<SettlementVoid> {
         env.storage().persistent().get(&DataKey::Void(payment_id))
     }
 
-    /// Paginated list of settlement records for a merchant.
-    /// `page` is 0-indexed; returns up to PAGE_SIZE (20) records per page.
-    pub fn list_settlements(env: Env, merchant: Address, page: u32) -> Vec<SettlementRecord> {
-        let count_key = DataKey::MerchantCount(merchant.clone());
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&count_key)
-            .unwrap_or(0);
-        if page >= count.saturating_add(PAGE_SIZE - 1) / PAGE_SIZE {
-            return vec![&env];
-        }
-
-        let page_key = DataKey::MerchantPage(merchant, page);
-        let index: Vec<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&page_key)
-            .unwrap_or_else(|| vec![&env]);
-        let mut results: Vec<SettlementRecord> = vec![&env];
-        for i in 0..index.len() {
-            let pid = index.get(i).unwrap();
-            let record: SettlementRecord = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Settlement(pid))
-                .unwrap();
-            results.push_back(record);
-        }
-        results
-    }
-
-    /// Total number of settlements recorded for a merchant.
-    pub fn settlement_count(env: Env, merchant: Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get::<_, u32>(&DataKey::MerchantCount(merchant))
-            .unwrap_or(0)
-    }
-
-    /// Paginated platform-wide settlement list. Reads only the requested page
-    /// key (`AllPage(page)`) — O(1) with respect to total settlement history.
-    pub fn list_all_settlements(env: Env, page: u32) -> Vec<SettlementRecord> {
-        let total_count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TotalCount)
-            .unwrap_or(0);
-        let start = page.saturating_mul(PAGE_SIZE);
-        if start >= total_count { return vec![&env]; }
-        let page_key = DataKey::AllPage(page);
-        let index: Vec<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&page_key)
-            .unwrap_or_else(|| vec![&env]);
-        let mut results = vec![&env];
-        for i in 0..index.len() {
-            let payment_id = index.get(i).unwrap();
-            results.push_back(env.storage().persistent().get(&DataKey::Settlement(payment_id)).unwrap());
-        }
-        results
-    }
-
-    pub fn total_settlement_count(env: Env) -> u32 {
-        env.storage()
-            .persistent()
-            .get::<_, u32>(&DataKey::TotalCount)
-            .unwrap_or(0)
-    }
-
     fn require_admin(env: &Env, caller: &Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        assert!(caller == &admin, "not admin");
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin not set");
+        assert!(caller == &admin, "caller is not admin");
     }
 }

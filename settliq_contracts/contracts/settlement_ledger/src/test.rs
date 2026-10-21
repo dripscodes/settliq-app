@@ -1,8 +1,8 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
+use soroban_sdk::{testutils::{Address as _, Events}, Address, BytesN, Env, IntoVal, String, Symbol};
 
-use crate::{SettlementLedgerContract, SettlementLedgerContractClient};
+use crate::{SettlementLedgerContract, SettlementLedgerContractClient, SettlementVoidedEvent};
 
 fn pid(env: &Env, seed: u8) -> BytesN<32> {
     BytesN::from_array(env, &[seed; 32])
@@ -119,6 +119,31 @@ fn test_void_preserves_original_settlement() {
     client.void_settlement(&admin, &pid(&env, 7), &fiat_ref(&env, "operator correction"));
     assert_eq!(client.get_settlement(&pid(&env, 7)).amount, 1_000);
     assert_eq!(client.get_settlement_void(&pid(&env, 7)).unwrap().reason, fiat_ref(&env, "operator correction"));
+}
+
+#[test]
+fn test_void_settlement_emits_event() {
+    let (env, admin, client) = setup();
+    let merchant = Address::generate(&env);
+    record(&client, &admin, &env, 9, &merchant, 1_000, 20);
+
+    let reason = fiat_ref(&env, "operator correction");
+    client.void_settlement(&admin, &pid(&env, 9), &reason);
+
+    let voided_at = env.ledger().timestamp();
+    let expected = SettlementVoidedEvent {
+        payment_id: pid(&env, 9),
+        reason: reason.clone(),
+        voided_at,
+    };
+
+    let events = env.events().all();
+    let found = events.iter().any(|(contract, topics, data)| {
+        contract == client.address
+            && topics == (Symbol::new(&env, "SETTLEMENT_LEDGER"), Symbol::new(&env, "settlement_voided")).into_val(&env)
+            && data == expected.into_val(&env)
+    });
+    assert!(found, "SettlementVoidedEvent not emitted");
 }
 
 // ── fee + net must equal amount ───────────────────────────────────────────────
