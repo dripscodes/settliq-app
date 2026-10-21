@@ -10,6 +10,8 @@ import { randomBytes, createHash } from 'crypto';
 import { WaitlistEntry } from './entities/waitlist.entity';
 import { JoinWaitlistDto } from './dto/join-waitlist.dto';
 
+const REFERRAL_CODE_MAX_ATTEMPTS = 3;
+
 @Injectable()
 export class WaitlistService {
   constructor(
@@ -24,7 +26,7 @@ export class WaitlistService {
 
     const rawToken = randomBytes(32).toString('hex');
     const unsubscribeTokenHash = createHash('sha256').update(rawToken).digest('hex');
-    const referralCode = randomBytes(6).toString('hex').toUpperCase();
+    const referralCode = await this.generateUniqueReferralCode();
 
     // Wrap referral crediting and entry creation in a single atomic transaction
     await this.dataSource.transaction(async (manager) => {
@@ -48,6 +50,23 @@ export class WaitlistService {
 
     // Return the raw token so it can be included in the confirmation email
     return { rawToken };
+  }
+
+  /**
+   * Generate a referral code that does not already exist in the database.
+   * Retries up to REFERRAL_CODE_MAX_ATTEMPTS times on collision before failing.
+   */
+  private async generateUniqueReferralCode(): Promise<string> {
+    for (let attempt = 0; attempt < REFERRAL_CODE_MAX_ATTEMPTS; attempt++) {
+      const candidate = randomBytes(6).toString('hex').toUpperCase();
+      const collision = await this.waitlistRepo.findOne({
+        where: { referralCode: candidate },
+      });
+      if (!collision) return candidate;
+    }
+    throw new ConflictException(
+      'Unable to generate a unique referral code, please try again',
+    );
   }
 
   async checkUsername(username: string): Promise<{ available: boolean }> {
