@@ -1,30 +1,18 @@
-import { IsEmail, IsString, MinLength, IsOptional } from 'class-validator';
-import { Transform } from 'class-transformer';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
+import { IsEmail, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class RegisterDto {
-  @ApiProperty({ example: 'merchant@example.com' })
+  @ApiProperty({ example: 'user@example.com' })
   @IsEmail()
-  @Transform(({ value }) => value?.trim())
   email: string;
 
-  @ApiProperty({ example: 'SecurePass123!', minLength: 8 })
+  @ApiProperty({ example: 'SecurePass123!', minLength: 8, maxLength: 72 })
   @IsString()
   @MinLength(8)
+  @MaxLength(72)
+  @Matches(/((?=.*\d)|(?=.*\W+))(?![.\n])(?=.*[A-Z])(?=.*[a-z]).*$/, {
+    message:
+      'password must contain at least one uppercase letter, one lowercase letter, and one number or special character',
+  })
   password: string;
-
-  @ApiProperty({ example: 'Acme Corp' })
-  @IsString()
-  @Transform(({ value }) => value?.trim())
-  businessName: string;
-
-  @ApiPropertyOptional({ example: 'retail' })
-  @IsOptional()
-  @IsString()
-  businessType?: string;
-
-  @ApiPropertyOptional({ example: 'NG' })
-  @IsOptional()
-  @IsString()
-  country?: string;
 }
