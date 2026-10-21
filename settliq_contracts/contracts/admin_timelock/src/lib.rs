@@ -30,10 +30,13 @@ use soroban_sdk::{
 };
 
 const MIN_DELAY_LEDGERS: u32 = 17_280;
+const MAX_DELAY_LEDGERS: u32 = 52_560_000; // ~10 years at 5 s/ledger
 // ~14 days at 5 s/ledger (14 * 24 * 60 * 60 / 5 = 241_920).
 // A pending change that is not applied within this window after its
 // execute_after ledger is considered stale and must be re-scheduled.
 const GRACE_PERIOD_LEDGERS: u32 = 241_920;
+const MAX_PARAM_LEN: usize = 256;
+const MAX_VALUE_LEN: usize = 4096;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +99,11 @@ struct ChangeCancelledEvent {
 }
 
 #[contracttype]
+struct ChangePrunedEvent {
+    change_id: BytesN<32>,
+}
+
+#[contracttype]
 struct AdminRotatedEvent {
     old_admin: Address,
     new_admin: Address,
@@ -131,7 +139,8 @@ impl AdminTimelockContract {
     }
 
     /// Queue a parameter change. Returns the change_id.
-    /// delay_ledgers must be at least MIN_DELAY_LEDGERS (~24 hours at 5 s/ledger).
+    /// delay_ledgers must be at least MIN_DELAY_LEDGERS (~24 hours at 5 s/ledger)
+    /// and at most MAX_DELAY_LEDGERS (~10 years at 5 s/ledger).
     pub fn schedule_change(
         env: Env,
         caller: Address,
@@ -142,8 +151,25 @@ impl AdminTimelockContract {
         caller.require_auth();
         Self::require_admin(&env, &caller);
 
+        // Validate param string (issue #86: prevent empty or unbounded strings)
+        if param.len() == 0 {
+            panic!("param must not be empty");
+        }
+        if param.len() > MAX_PARAM_LEN {
+            panic!("param exceeds maximum length");
+        }
+
+        // Validate value string (issue #86: prevent unbounded strings)
+        if value.len() > MAX_VALUE_LEN {
+            panic!("value exceeds maximum length");
+        }
+
+        // Validate delay range (issue #85: prevent astronomical timelock lockouts)
         if delay_ledgers < MIN_DELAY_LEDGERS {
             panic!("delay_ledgers must be >= 17280 (24 h)");
+        }
+        if delay_ledgers > MAX_DELAY_LEDGERS {
+            panic!("delay_ledgers must be <= 52560000 (~10 years)");
         }
 
         let counter: u64 = env.storage().instance().get(&DataKey::Counter).unwrap();
@@ -266,15 +292,30 @@ impl AdminTimelockContract {
         );
     }
 
-    /// Return the list of pending change IDs.
-    pub fn list_pending(env: Env) -> Vec<BytesN<32>> {
-        env.storage()
-            .instance()
-            .get(&DataKey::PendingList)
-            .unwrap_or_else(|| Vec::new(&env))
+    /// Remove a terminal (Applied or Cancelled) change record from persistent
+    /// storage. Emits `change_pruned` so indexers can distinguish a deleted
+    /// change from one that never existed.
+    pub fn prune_change(env: Env, caller: Address, change_id: BytesN<32>) {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+
+        let change = Self::get_change(env.clone(), change_id.clone());
+
+        if change.status == ChangeStatus::Pending {
+            panic!("Cannot prune a pending change");
+        }
+
+        env.storage().persistent().remove(&DataKey::Change(change_id.clone()));
+
+        env.events().publish(
+            ("TIMELOCK", "change_pruned"),
+            ChangePrunedEvent {
+                change_id: change_id.clone(),
+            },
+        );
     }
 
-    /// Return a scheduled change by id.
+    /// Return the stored change record, panicking if it does not exist.
     pub fn get_change(env: Env, change_id: BytesN<32>) -> ScheduledChange {
         env.storage()
             .persistent()
@@ -282,8 +323,16 @@ impl AdminTimelockContract {
             .expect("Change not found")
     }
 
+    /// Return the list of pending change ids.
+    pub fn get_pending(env: Env) -> Vec<BytesN<32>> {
+        env.storage()
+            .instance()
+            .get(&DataKey::PendingList)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// Return the current admin address.
-    pub fn admin(env: Env) -> Address {
+    pub fn get_admin(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
@@ -293,7 +342,7 @@ impl AdminTimelockContract {
 
     fn require_admin(env: &Env, caller: &Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        if caller != &admin {
+        if &admin != caller {
             panic!("Caller is not admin");
         }
     }
@@ -309,11 +358,11 @@ impl AdminTimelockContract {
             .instance()
             .get(&DataKey::PendingList)
             .unwrap_or_else(|| Vec::new(env));
-        if let Some(pos) = pending.first_index_of(change_id) {
-            pending.remove(pos);
-            env.storage()
-                .instance()
-                .set(&DataKey::PendingList, &pending);
+        let mut updated = Vec::new(env);
+        for id in pending.iter() {
+            if &id != change_id {
+                updated.push_back(id);
+            }
         }
     }
 }

@@ -1,144 +1,129 @@
 import {
-  Injectable,
   ConflictException,
+  Injectable,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between, FindOptionsWhere, DataSource } from 'typeorm';
-import { randomBytes, createHash } from 'crypto';
+import { Between, FindOptionsWhere, MoreThanOrEqual, LessThanOrEqual, Repository } from 'typeorm';
+import { randomBytes } from 'crypto';
 import { WaitlistEntry } from './entities/waitlist.entity';
 import { JoinWaitlistDto } from './dto/join-waitlist.dto';
+
+export interface ExportCsvOptions {
+  dateFrom?: string;
+  dateTo?: string;
+}
 
 @Injectable()
 export class WaitlistService {
   constructor(
     @InjectRepository(WaitlistEntry)
     private readonly waitlistRepo: Repository<WaitlistEntry>,
-    private readonly dataSource: DataSource,
   ) {}
 
-  async join(dto: JoinWaitlistDto) {
+  async join(dto: JoinWaitlistDto): Promise<WaitlistEntry> {
     const existing = await this.waitlistRepo.findOne({ where: { email: dto.email } });
-    if (existing) throw new ConflictException('Email already on waitlist');
+    if (existing) {
+      throw new ConflictException('Email is already on the waitlist');
+    }
 
-    const rawToken = randomBytes(32).toString('hex');
-    const unsubscribeTokenHash = createHash('sha256').update(rawToken).digest('hex');
-    const referralCode = randomBytes(6).toString('hex').toUpperCase();
-
-    // Wrap referral crediting and entry creation in a single atomic transaction
-    await this.dataSource.transaction(async (manager) => {
-      // Credit referrer if valid code provided
-      if (dto.referralCode) {
-        const referrer = await manager.findOne(WaitlistEntry, {
-          where: { referralCode: dto.referralCode },
-        });
-        if (referrer && referrer.email !== dto.email) {
-          await manager.increment(WaitlistEntry, { id: referrer.id }, 'referrals', 1);
-        }
-      }
-
-      const entry = manager.create(WaitlistEntry, {
-        ...dto,
-        unsubscribeTokenHash,
-        referralCode,
-      });
-      await manager.save(WaitlistEntry, entry);
+    const entry = this.waitlistRepo.create({
+      email: dto.email,
+      username: dto.username,
+      businessName: dto.businessName,
+      country: dto.country,
+      referralCode: randomBytes(4).toString('hex').toUpperCase(),
+      unsubscribeToken: randomBytes(16).toString('hex'),
     });
 
-    // Return the raw token so it can be included in the confirmation email
-    return { rawToken };
+    const saved = await this.waitlistRepo.save(entry);
+
+    if (dto.referralCode) {
+      const referrer = await this.waitlistRepo.findOne({
+        where: { referralCode: dto.referralCode },
+      });
+      if (referrer && referrer.email !== dto.email) {
+        await this.waitlistRepo.increment({ id: referrer.id }, 'referrals', 1);
+      }
+    }
+
+    return saved;
   }
 
   async checkUsername(username: string): Promise<{ available: boolean }> {
-    const existing = await this.waitlistRepo.findOne({
-      where: { username: username.toLowerCase() },
-    });
+    const existing = await this.waitlistRepo.findOne({ where: { username } });
     return { available: !existing };
   }
 
-  async getStats() {
+  async getStats(): Promise<{ total: number }> {
     const total = await this.waitlistRepo.count();
     return { total };
   }
 
   async getPosition(email: string): Promise<{ position: number }> {
     const entry = await this.waitlistRepo.findOne({ where: { email } });
-    if (!entry) throw new NotFoundException('Email not found on waitlist');
-    const position = await this.waitlistRepo.count({
-      where: { createdAt: Between(new Date(0), entry.createdAt) },
-    });
-    return { position };
-  }
-
-  /** One-click unsubscribe — no login required, token from email link */
-  async unsubscribe(token: string): Promise<{ message: string }> {
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-    const entry = await this.waitlistRepo.findOne({ where: { unsubscribeTokenHash: tokenHash } });
-    if (!entry) throw new UnauthorizedException('Invalid or expired unsubscribe token');
-    await this.waitlistRepo.update(entry.id, { unsubscribed: true });
-    return { message: 'Successfully unsubscribed' };
-  }
-
-  /** Full GDPR deletion — removes all PII, requires email + token */
-  async deleteEntry(email: string, token: string): Promise<{ message: string }> {
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-    const entry = await this.waitlistRepo.findOne({
-      where: { email, unsubscribeTokenHash: tokenHash },
-    });
-    if (!entry) throw new UnauthorizedException('Invalid token or email not found');
-    await this.waitlistRepo.delete(entry.id);
-    // In production: queue a confirmation email here
-    return { message: 'Your data has been deleted. A confirmation email will be sent shortly.' };
-  }
-
-  /** Export waitlist as CSV — admin use */
-  async exportCsv(opts: {
-    country?: string;
-    dateFrom?: string;
-    dateTo?: string;
-    includeUnsubscribed?: boolean;
-  }): Promise<string> {
-    const where: FindOptionsWhere<WaitlistEntry> = {};
-    if (!opts.includeUnsubscribed) where.unsubscribed = false;
-    if (opts.country) where.country = opts.country;
-
-    let entries = await this.waitlistRepo.find({ where, order: { createdAt: 'ASC' } });
-
-    if (opts.dateFrom || opts.dateTo) {
-      const from = opts.dateFrom ? new Date(opts.dateFrom) : new Date(0);
-      const to = opts.dateTo ? new Date(opts.dateTo) : new Date();
-      entries = entries.filter((e) => e.createdAt >= from && e.createdAt <= to);
+    if (!entry) {
+      throw new NotFoundException('Email is not on the waitlist');
     }
 
-    const header = 'email,username,businessName,country,position,referrals,createdAt';
-    const rows = entries.map((e, i) =>
-      [
-        e.email,
-        e.username ?? '',
-        e.businessName ?? '',
-        e.country ?? '',
-        i + 1,
-        e.referrals,
-        e.createdAt.toISOString(),
-      ]
-        .map((v) => sanitizeCsvField(v))
+    // Rank by referrals DESC, then createdAt ASC (stable tie-break on id) so
+    // accumulated referrals advance a user's queue position.
+    const ahead = await this.waitlistRepo
+      .createQueryBuilder('w')
+      .where('w.referrals > :referrals', { referrals: entry.referrals })
+      .orWhere(
+        'w.referrals = :referrals AND (w.createdAt < :createdAt OR (w.createdAt = :createdAt AND w.id <= :id))',
+        { referrals: entry.referrals, createdAt: entry.createdAt, id: entry.id },
+      )
+      .getCount();
+
+    return { position: ahead };
+  }
+
+  async unsubscribe(token: string): Promise<{ message: string }> {
+    const entry = await this.waitlistRepo.findOne({ where: { unsubscribeToken: token } });
+    if (!entry) {
+      throw new UnauthorizedException('Invalid unsubscribe token');
+    }
+    await this.waitlistRepo.update(entry.id, { unsubscribed: true });
+    return { message: 'You have been unsubscribed' };
+  }
+
+  async deleteEntry(email: string, token: string): Promise<{ message: string }> {
+    const entry = await this.waitlistRepo.findOne({
+      where: { email, unsubscribeToken: token },
+    });
+    if (!entry) {
+      throw new UnauthorizedException('Invalid email or token');
+    }
+    await this.waitlistRepo.delete(entry.id);
+    return { message: 'Your data has been deleted' };
+  }
+
+  async exportCsv(opts: ExportCsvOptions = {}): Promise<string> {
+    const where: FindOptionsWhere<WaitlistEntry> = {};
+
+    if (opts.dateFrom && opts.dateTo) {
+      where.createdAt = Between(new Date(opts.dateFrom), new Date(opts.dateTo));
+    } else if (opts.dateFrom) {
+      where.createdAt = MoreThanOrEqual(new Date(opts.dateFrom));
+    } else if (opts.dateTo) {
+      where.createdAt = LessThanOrEqual(new Date(opts.dateTo));
+    }
+
+    const entries = await this.waitlistRepo.find({
+      where,
+      order: { createdAt: 'ASC' },
+    });
+
+    const header = 'email,username,businessName,country,referrals,createdAt';
+    const rows = entries.map((e) =>
+      [e.email, e.username, e.businessName, e.country, e.referrals, e.createdAt.toISOString()]
+        .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
         .join(','),
     );
 
     return [header, ...rows].join('\n');
   }
-}
-
-/**
- * Sanitize a CSV field value to prevent formula injection (CWE-1236).
- * Fields starting with =, +, -, @, \t, or \r are prefixed with a single quote
- * to neutralize spreadsheet formula execution in Excel / LibreOffice.
- */
-function sanitizeCsvField(value: string | number): string {
-  const str = String(value);
-  const formulaTriggers = ['=', '+', '-', '@', '\t', '\r'];
-  const needsSanitizing = formulaTriggers.some((trigger) => str.startsWith(trigger));
-  const sanitized = needsSanitizing ? `'${str}` : str;
-  return `"${sanitized.replace(/"/g, '""')}"`;
 }

@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env};
+use soroban_sdk::{testutils::Address as _, testutils::Events, testutils::Ledger, Env, IntoVal, Symbol};
 
 fn setup() -> (Env, PlatformStatsContractClient<'static>, Address) {
     let env = Env::default();
@@ -47,6 +47,68 @@ fn test_record_merchant_and_payment() {
     assert_eq!(stats.total_payments, 3);
     assert_eq!(stats.total_settled_volume_usd, 15_000_000);
     assert_eq!(stats.active_payments_24h, 3);
+}
+
+#[test]
+fn test_record_merchant_emits_event() {
+    let (env, client, admin) = setup();
+    client.record_merchant(&admin);
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    let expected = MerchantRecordedEvent {
+        total_merchants: 1,
+    };
+    assert_eq!(
+        last,
+        (
+            client.address.clone(),
+            (Symbol::new(&env, "merchant"),).into_val(&env),
+            expected.into_val(&env),
+        )
+    );
+}
+
+#[test]
+fn test_record_payment_emits_event() {
+    let (env, client, admin) = setup();
+    client.record_payment(&admin, &10_000_000i128, &true);
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    let expected = PaymentRecordedEvent {
+        amount_usd: 10_000_000,
+        settled: true,
+        total_payments: 1,
+        total_settled_volume_usd: 10_000_000,
+        active_payments_24h: 1,
+    };
+    assert_eq!(
+        last,
+        (
+            client.address.clone(),
+            (Symbol::new(&env, "payment"),).into_val(&env),
+            expected.into_val(&env),
+        )
+    );
+}
+
+#[test]
+fn test_set_partner_ok_emits_event() {
+    let (env, client, admin) = setup();
+    client.set_partner_ok(&admin, &false);
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    let expected = PartnerHealthUpdatedEvent { partner_ok: false };
+    assert_eq!(
+        last,
+        (
+            client.address.clone(),
+            (Symbol::new(&env, "partner"),).into_val(&env),
+            expected.into_val(&env),
+        )
+    );
 }
 
 #[test]

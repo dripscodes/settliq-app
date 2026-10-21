@@ -1,33 +1,34 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEmail, IsOptional, IsString } from 'class-validator';
 import { Transform } from 'class-transformer';
+import { IsEmail, IsOptional, IsString, Length, Matches } from 'class-validator';
 
 export class JoinWaitlistDto {
-  @ApiProperty({ example: 'founder@example.com' })
   @IsEmail()
-  @Transform(({ value }) => value?.trim())
+  @Transform(({ value }) => value?.trim().toLowerCase())
   email: string;
 
-  @ApiPropertyOptional({ example: 'acme_corp' })
   @IsOptional()
   @IsString()
-  @Transform(({ value }) => value?.trim())
+  @Length(3, 30)
+  @Matches(/^[a-zA-Z0-9_]+$/, {
+    message: 'username may only contain letters, numbers, and underscores',
+  })
+  @Transform(({ value }) => value?.trim().toLowerCase())
   username?: string;
 
-  @ApiPropertyOptional({ example: 'Acme Corp' })
   @IsOptional()
   @IsString()
+  @Length(1, 100)
   @Transform(({ value }) => value?.trim())
   businessName?: string;
 
-  @ApiPropertyOptional({ example: 'NG' })
+  @IsOptional()
+  @IsString()
+  @Length(2, 2)
+  @Transform(({ value }) => value?.trim().toUpperCase())
+  country?: string;
+
   @IsOptional()
   @IsString()
   @Transform(({ value }) => value?.trim())
-  country?: string;
-
-  @ApiPropertyOptional({ example: 'REF123' })
-  @IsOptional()
-  @IsString()
   referralCode?: string;
 }

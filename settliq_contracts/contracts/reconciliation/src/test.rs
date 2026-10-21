@@ -1,7 +1,8 @@
 #![cfg(test)]
 
 use crate::{
-    MerkleProofNode, ReconciliationContract, ReconciliationContractClient, ReconciliationSubmittedEvent,
+    AdminTransferredEvent, BatchesArchivedEvent, MerkleProofNode, ReconciliationContract,
+    ReconciliationContractClient, ReconciliationSubmittedEvent,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -138,6 +139,50 @@ fn test_submit_emits_reconciliation_submitted_event() {
     assert_eq!(payload.submitted_at, 1_720_000_000);
     // The ID is what an indexer needs to ask for this root again later.
     assert_eq!(payload.batch_id, 0);
+}
+
+#[test]
+fn test_transfer_admin_emits_admin_transferred_event() {
+    let (env, client, admin) = setup_env();
+    let new_admin = Address::generate(&env);
+
+    client.transfer_admin(&admin, &new_admin);
+
+    let all_events = env.events().all();
+    let event = all_events.last().unwrap();
+
+    let expected_topic = ("RECONCILIATION", "admin_transferred").into_val(&env);
+    assert_eq!(event.1, expected_topic);
+
+    let payload = AdminTransferredEvent::try_from_val(&env, &event.2).unwrap();
+    assert_eq!(payload.previous_admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
+#[test]
+fn test_archive_batches_emits_batches_archived_event() {
+    let (env, client, admin) = setup_env();
+
+    client.submit_merkle_root(&admin, &make_id(&env, 1));
+    client.submit_merkle_root(&admin, &make_id(&env, 2));
+    client.submit_merkle_root(&admin, &make_id(&env, 3));
+
+    client.archive_batches(&admin, &1);
+
+    let all_events = env.events().all();
+    let event = all_events.last().unwrap();
+
+    let expected_topic = ("RECONCILIATION", "batches_archived").into_val(&env);
+    assert_eq!(event.1, expected_topic);
+
+    let payload = BatchesArchivedEvent::try_from_val(&env, &event.2).unwrap();
+    assert_eq!(payload.batches_pruned, 2);
+    assert_eq!(payload.upper_batch_id, 1);
+
+    // Pruned batches are gone; the surviving one is still readable.
+    assert!(client.get_batch(&0).is_none());
+    assert!(client.get_batch(&1).is_none());
+    assert!(client.get_batch(&2).is_some());
 }
 
 // ---------------------------------------------------------------------------

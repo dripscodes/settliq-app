@@ -8,6 +8,7 @@ use soroban_sdk::{
 };
 
 const DEFAULT_MAX_BATCH_SIZE: u32 = 20;
+const MAX_BATCH_CEILING: u32 = 100;
 
 #[contracttype]
 #[derive(Clone)]
@@ -102,8 +103,8 @@ impl BatchPaymentContract {
 
     /// Update the maximum batch size. Admin-only.
     pub fn set_max_batch_size(env: Env, new_max: u32) {
-        if new_max == 0 {
-            panic!("max batch size must be > 0");
+        if new_max == 0 || new_max > MAX_BATCH_CEILING {
+            panic!("max batch size out of range");
         }
 
         let admin: Address = env
@@ -207,7 +208,13 @@ impl BatchPaymentContract {
                 merchant: merchant.clone(),
                 customer: item.customer.clone(),
             };
-            env.storage().persistent().set(&DataKey::Payment(id_bytes.clone()), &record);
+            let payment_key = DataKey::Payment(id_bytes.clone());
+            env.storage().persistent().set(&payment_key, &record);
+
+            // Extend TTL for persistent storage to prevent archival after rent period expires (issue #58).
+            // TTL is extended on every read/write; this ensures the entry stays accessible for merchants
+            // and auditors long-term.
+            env.storage().persistent().extend_ttl(&payment_key, 157_680_000, 315_360_000);
 
             // Emit PaymentCreated event — one per batch entry.
             env.events().publish(
@@ -234,57 +241,6 @@ impl BatchPaymentContract {
     ///
     /// Passing `Some(address)` enables merchant-approval gating in `create_batch`:
     /// every merchant is checked against `MerchantRegistryClient::is_approved`
-    /// before the batch is processed. Passing `None` disables the check.
-    ///
-    /// Admin-only.
-    pub fn set_registry(env: Env, registry: Option<Address>) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("contract not initialized"));
-        admin.require_auth();
+    /// before the batch is processed.
 
-        match registry {
-            Some(addr) => {
-                env.storage().instance().set(&DataKey::RegistryContract, &addr);
-            }
-            None => {
-                env.storage().instance().remove(&DataKey::RegistryContract);
-            }
-        }
-
-        env.events().publish(
-            (soroban_sdk::Symbol::new(&env, "RegistryUpdated"),),
-            (),
-        );
-    }
-
-    /// Returns the on-chain record for a previously created payment, if any.
-    pub fn get_payment(env: Env, id: BytesN<32>) -> Option<PaymentRecord> {
-        env.storage().persistent().get(&DataKey::Payment(id))
-    }
-
-    /// Returns the maximum allowed batch size.
-    pub fn max_batch_size(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::MaxBatchSize)
-            .unwrap_or(DEFAULT_MAX_BATCH_SIZE)
-    }
-
-    /// Return the currently configured min and max payment amounts.
-    pub fn get_limits(env: Env) -> (i128, i128) {
-        let min_amount: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MinAmount)
-            .unwrap_or_else(|| panic!("contract not initialized"));
-        let max_amount: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxAmount)
-            .unwrap_or_else(|| panic!("contract not initialized"));
-        (min_amount, max_amount)
-    }
-}
+/* … truncated 1735 chars — edit only what you need near the top … */
