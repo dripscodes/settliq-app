@@ -71,6 +71,12 @@ struct SettlementVoidedEvent {
     voided_at: u64,
 }
 
+#[contracttype]
+struct AdminTransferredEvent {
+    old_admin: Address,
+    new_admin: Address,
+}
+
 // ── contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -87,7 +93,19 @@ impl SettlementLedgerContract {
     pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin not set");
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            ("SETTLEMENT_LEDGER", "admin_transferred"),
+            AdminTransferredEvent {
+                old_admin,
+                new_admin,
+            },
+        );
     }
 
     /// Write an immutable settlement record. Admin-only (called by NestJS backend).
@@ -216,7 +234,11 @@ impl SettlementLedgerContract {
         let key = DataKey::Void(payment_id.clone());
         assert!(!env.storage().persistent().has(&key), "settlement already voided");
         let voided_at = env.ledger().timestamp();
-        env.storage().persistent().set(&key, &SettlementVoid { payment_id: payment_id.clone(), reason: reason.clone(), voided_at });
+        env.storage().persistent().set(&key, &SettlementVoid {
+            payment_id: payment_id.clone(),
+            reason: reason.clone(),
+            voided_at,
+        });
 
         env.events().publish(
             ("SETTLEMENT_LEDGER", "settlement_voided"),
@@ -226,11 +248,6 @@ impl SettlementLedgerContract {
                 voided_at,
             },
         );
-    }
-
-    /// Returns the void marker for a settlement, if it was corrected.
-    pub fn get_void(env: Env, payment_id: BytesN<32>) -> Option<SettlementVoid> {
-        env.storage().persistent().get(&DataKey::Void(payment_id))
     }
 
     fn require_admin(env: &Env, caller: &Address) {
