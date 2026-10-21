@@ -5,6 +5,7 @@ import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { AuthService } from './auth.service';
 import { Merchant } from '../merchants/entities/merchant.entity';
+import { MerchantStatus } from '../merchants/entities/merchant.entity';
 
 jest.mock('bcrypt');
 
@@ -46,6 +47,30 @@ describe('AuthService', () => {
 
   afterEach(() => {
     jest.clearAllMocks();
+  });
+
+  describe('register', () => {
+    it('creates the merchant with PENDING status', async () => {
+      repository.findOne.mockResolvedValue(null);
+      repository.create.mockImplementation((data: Partial<Merchant>) =>
+        mockMerchant(data),
+      );
+      repository.save.mockImplementation(async (m: Merchant) => m);
+      (bcrypt.hash as jest.Mock).mockResolvedValue('hashed-password');
+
+      const merchant = await service.register({
+        email: 'new@example.com',
+        password: 'password123',
+        businessName: 'New Biz',
+        businessType: 'retail',
+        country: 'US',
+      } as any);
+
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ status: MerchantStatus.PENDING }),
+      );
+      expect(merchant.status).toBe(MerchantStatus.PENDING);
+    });
   });
 
   describe('forgotPassword', () => {

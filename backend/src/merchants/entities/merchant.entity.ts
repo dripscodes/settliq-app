@@ -6,6 +6,12 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
+export enum MerchantStatus {
+  PENDING = 'pending',
+  ACTIVE = 'active',
+  SUSPENDED = 'suspended',
+}
+
 @Entity('merchants')
 export class Merchant {
   @PrimaryGeneratedColumn('uuid')
@@ -40,6 +46,13 @@ export class Merchant {
 
   @Column({ type: 'timestamptz', nullable: true })
   apiKeyRevokedAt?: Date;
+
+  @Column({
+    type: 'enum',
+    enum: MerchantStatus,
+    default: MerchantStatus.PENDING,
+  })
+  status: MerchantStatus;
 
   @CreateDateColumn()
   createdAt: Date;
