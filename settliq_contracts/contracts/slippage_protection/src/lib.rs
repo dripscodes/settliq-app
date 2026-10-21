@@ -115,6 +115,9 @@ impl SlippageProtectionContract {
     ) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
+        if bps > 10_000 {
+            panic!("bps must be <= 10000");
+        }
         let (k1, k2) = Self::canonical_pair(&env, asset_a.clone(), asset_b.clone());
 
         // Read the previous value (falls back to global default when no

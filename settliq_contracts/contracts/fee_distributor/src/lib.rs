@@ -116,7 +116,8 @@ impl FeeDistributorContract {
     pub fn add_allowed_token(env: Env, caller: Address, token: Address) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
-        let mut tokens: Vec<Address> = env
+
+        let mut allowed: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AllowedTokens)
@@ -130,7 +131,8 @@ impl FeeDistributorContract {
     pub fn remove_allowed_token(env: Env, caller: Address, token: Address) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
-        let tokens: Vec<Address> = env
+
+        let allowed: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AllowedTokens)

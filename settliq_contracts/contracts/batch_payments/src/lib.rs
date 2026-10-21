@@ -198,6 +198,9 @@ impl BatchPaymentContract {
             seed_bytes.extend_from_array(&(env.ledger().sequence() as u64).to_be_bytes());
             seed_bytes.extend_from_array(&new_counter.to_be_bytes());
             seed_bytes.append(&merchant.clone().to_xdr(&env));
+            seed_bytes.extend_from_array(&item.amount.to_be_bytes());
+            seed_bytes.append(&item.memo.to_xdr(&env));
+            seed_bytes.append(&item.customer.to_xdr(&env));
 
             let id_bytes: BytesN<32> = env.crypto().sha256(&seed_bytes).into();
 

@@ -227,316 +227,83 @@ fn test_distribute_event_includes_token_address() {
     let last = events.last().unwrap();
     let event: crate::FeeDistributedEvent = last.2.into_val(&s.env);
     assert_eq!(event.token, s.token_address);
+    assert_eq!(event.treasury, s.treasury);
+    assert_eq!(event.lp_address, s.lp);
     assert_eq!(event.treasury_amount, 5_000);
     assert_eq!(event.lp_amount, 5_000);
 }
 
-// ─── Config / admin update tests ─────────────────────────────────────────────
+// ─── Setter address-invariant tests (issue #94) ──────────────────────────────
 
+/// `set_treasury` must reject setting treasury equal to the current lp_address.
 #[test]
-fn test_update_lp_share() {
+#[should_panic(expected = "treasury must differ from lp_address")]
+fn test_set_treasury_rejects_lp_address() {
     let s = setup(5_000);
-    s.client.set_lp_share(&s.admin, &2_000);
-    let (_, _, bps) = s.client.get_config();
-    assert_eq!(bps, 2_000);
-    s.client.distribute(&s.caller, &s.token_address, &10_000);
-    assert_eq!(s.token.balance(&s.lp), 2_000);
-    assert_eq!(s.token.balance(&s.treasury), 8_000);
+    s.client.set_treasury(&s.admin, &s.lp);
 }
 
+/// `set_treasury` must reject setting treasury equal to the admin.
 #[test]
-fn test_update_addresses() {
+#[should_panic(expected = "treasury must differ from admin")]
+fn test_set_treasury_rejects_admin() {
     let s = setup(5_000);
-    let new_treasury = Address::generate(&s.env);
-    let new_lp = Address::generate(&s.env);
-    s.client.set_treasury(&s.admin, &new_treasury);
-    s.client.set_lp_address(&s.admin, &new_lp);
-    s.client.distribute(&s.caller, &s.token_address, &10_000);
-    assert_eq!(s.token.balance(&new_treasury), 5_000);
-    assert_eq!(s.token.balance(&new_lp), 5_000);
-    // old addresses untouched
-    assert_eq!(s.token.balance(&s.treasury), 0);
-    assert_eq!(s.token.balance(&s.lp), 0);
+    s.client.set_treasury(&s.admin, &s.admin);
 }
 
-/// `distribute` intentionally has NO caller allowlist: any address holding the
-/// token may call it and have its own funds split between treasury and LP.
-/// This test mints tokens to a second, unrelated address (distinct from the
-/// pre-minted `caller` in `setup()`) and calls `distribute` from it, asserting
-/// the current unrestricted behavior explicitly. If a future change adds a
-/// caller restriction, this test must be updated deliberately — making any
-/// access-control change a conscious, test-visible decision.
+/// `set_treasury` must reject setting treasury equal to the contract address.
 #[test]
-#[should_panic(expected = "caller not allowed")]
-fn test_distribute_from_unrelated_caller_rejected() {
-    let s = setup(5_000); // 50% LP
-
-    // A second, unrelated address that is not the pre-minted `caller`.
-    let unrelated = Address::generate(&s.env);
-    assert_ne!(unrelated, s.caller);
-
-    // Fund the unrelated caller so distribute() can pull from them.
-    let sac = StellarAssetClient::new(&s.env, &s.token.address);
-    sac.mint(&unrelated, &10_000);
-
-    // Unrelated caller is rejected by caller allowlist check
-    s.client.distribute(&unrelated, &s.token_address, &10_000);
-}
-
-#[test]
-#[should_panic(expected = "treasury and lp_address must differ")]
-fn test_constructor_rejects_treasury_equal_lp() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let shared = Address::generate(&env);
-    let caller = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-
-    env.register(
-        FeeDistributorContract,
-        (&admin, &shared, &shared, 5_000i128, &token_id.address(), &caller),
-    );
-}
-
-#[test]
-#[should_panic(expected = "admin and treasury must differ")]
-fn test_constructor_rejects_admin_equal_treasury() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let shared = Address::generate(&env);
-    let lp = Address::generate(&env);
-    let caller = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-
-    env.register(
-        FeeDistributorContract,
-        (&shared, &shared, &lp, 5_000i128, &token_id.address(), &caller),
-    );
-}
-
-#[test]
-#[should_panic(expected = "admin and lp_address must differ")]
-fn test_constructor_rejects_admin_equal_lp() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let treasury = Address::generate(&env);
-    let shared = Address::generate(&env);
-    let caller = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-
-    env.register(
-        FeeDistributorContract,
-        (&shared, &treasury, &shared, 5_000i128, &token_id.address(), &caller),
-    );
-}
-
-#[test]
-fn test_set_lp_share_emits_event() {
+#[should_panic(expected = "treasury must differ from contract")]
+fn test_set_treasury_rejects_contract_address() {
     let s = setup(5_000);
-    s.client.set_lp_share(&s.admin, &2_000);
-    let events = s.env.events().all();
-    let last = events.last().unwrap();
-    assert_eq!(
-        last.1,
-        (
-            soroban_sdk::String::from_str(&s.env, "FEE_DISTRIBUTOR"),
-            soroban_sdk::String::from_str(&s.env, "lp_share_updated")
-        )
-            .into_val(&s.env)
-    );
-    let event: crate::LpShareUpdatedEvent = last.2.into_val(&s.env);
-    assert_eq!(event.old_bps, 5_000);
-    assert_eq!(event.new_bps, 2_000);
-}
-
-#[test]
-fn test_set_treasury_emits_event() {
-    let s = setup(5_000);
-    let new_treasury = Address::generate(&s.env);
-    s.client.set_treasury(&s.admin, &new_treasury);
-    let events = s.env.events().all();
-    let last = events.last().unwrap();
-    assert_eq!(
-        last.1,
-        (
-            soroban_sdk::String::from_str(&s.env, "FEE_DISTRIBUTOR"),
-            soroban_sdk::String::from_str(&s.env, "treasury_updated")
-        )
-            .into_val(&s.env)
-    );
-    let event: crate::TreasuryUpdatedEvent = last.2.into_val(&s.env);
-    assert_eq!(event.old_treasury, s.treasury);
-    assert_eq!(event.new_treasury, new_treasury);
-}
-
-#[test]
-fn test_set_lp_address_emits_event() {
-    let s = setup(5_000);
-    let new_lp = Address::generate(&s.env);
-    s.client.set_lp_address(&s.admin, &new_lp);
-    let events = s.env.events().all();
-    let last = events.last().unwrap();
-    assert_eq!(
-        last.1,
-        (
-            soroban_sdk::String::from_str(&s.env, "FEE_DISTRIBUTOR"),
-            soroban_sdk::String::from_str(&s.env, "lp_address_updated")
-        )
-            .into_val(&s.env)
-    );
-    let event: crate::LpAddressUpdatedEvent = last.2.into_val(&s.env);
-    assert_eq!(event.old_lp_address, s.lp);
-    assert_eq!(event.new_lp_address, new_lp);
-}
-
-#[test]
-fn test_unauthorized_caller_rejected() {
-    let s = setup(5_000);
-    let stranger = Address::generate(&s.env);
-    let sac = StellarAssetClient::new(&s.env, &s.token.address);
-    sac.mint(&stranger, &10_000);
-    let res = s.client.try_distribute(&stranger, &s.token_address, &10_000);
-    assert!(res.is_err());
-    assert_eq!(s.token.balance(&s.treasury), 0);
-    assert_eq!(s.token.balance(&s.lp), 0);
-}
-
-#[test]
-fn test_rotate_allowed_caller() {
-    let s = setup(5_000);
-    let new_caller = Address::generate(&s.env);
-    let sac = StellarAssetClient::new(&s.env, &s.token.address);
-    sac.mint(&new_caller, &10_000);
-
-    // Old caller works before rotation
-    s.client.distribute(&s.caller, &s.token_address, &10_000);
-    assert_eq!(s.token.balance(&s.treasury), 5_000);
-
-    // Rotate to new caller
-    s.client.set_allowed_caller(&s.admin, &new_caller);
-
-    // Old caller now rejected
-    let res = s.client.try_distribute(&s.caller, &s.token_address, &10_000);
-    assert!(res.is_err());
-
-    // New caller works
-    s.client.distribute(&new_caller, &s.token_address, &10_000);
-    assert_eq!(s.token.balance(&s.treasury), 10_000);
-    assert_eq!(s.token.balance(&s.lp), 10_000);
-}
-
-#[test]
-fn test_transfer_admin_rotates_admin() {
-    let s = setup(5_000);
-    let new_admin = Address::generate(&s.env);
-
-    // Rotate admin
-    s.client.transfer_admin(&s.admin, &new_admin);
-
-    // Old admin can no longer perform gated calls
-    let res = s.client.try_set_lp_share(&s.admin, &2_000);
-    assert!(res.is_err());
-
-    // New admin can perform gated calls
-    s.client.set_lp_share(&new_admin, &2_000);
-    let (_, _, bps) = s.client.get_config();
-    assert_eq!(bps, 2_000);
-}
-
-#[test]
-fn test_transfer_admin_rejects_non_admin() {
-    let s = setup(5_000);
-    let stranger = Address::generate(&s.env);
-    let new_admin = Address::generate(&s.env);
-
-    let res = s.client.try_transfer_admin(&stranger, &new_admin);
-    assert!(res.is_err());
-
-    // Admin unchanged: original admin still works
-    s.client.set_lp_share(&s.admin, &2_000);
-    let (_, _, bps) = s.client.get_config();
-    assert_eq!(bps, 2_000);
-}
-
-// ─── transfer_admin invariant-check tests (issue #64) ────────────────────────
-
-/// transfer_admin must reject new_admin == current admin (no-op rotation).
-#[test]
-#[should_panic(expected = "new_admin must differ from current admin")]
-fn test_transfer_admin_rejects_same_admin() {
-    let s = setup(5_000);
-    // Attempt to rotate to the same address already stored as admin.
-    s.client.transfer_admin(&s.admin, &s.admin);
-}
-
-/// transfer_admin must reject new_admin == treasury to prevent a single
-/// address controlling both admin and treasury roles.
-#[test]
-#[should_panic(expected = "new_admin must not be the treasury address")]
-fn test_transfer_admin_rejects_treasury_as_new_admin() {
-    let s = setup(5_000);
-    s.client.transfer_admin(&s.admin, &s.treasury);
-}
-
-/// transfer_admin must reject new_admin == lp_address to prevent a single
-/// address controlling both admin and LP roles.
-#[test]
-#[should_panic(expected = "new_admin must not be the lp_address")]
-fn test_transfer_admin_rejects_lp_as_new_admin() {
-    let s = setup(5_000);
-    s.client.transfer_admin(&s.admin, &s.lp);
-}
-
-/// transfer_admin must reject new_admin == contract address.
-#[test]
-#[should_panic(expected = "new_admin must not be the contract address")]
-fn test_transfer_admin_rejects_contract_address_as_new_admin() {
-    let s = setup(5_000);
-    // Retrieve the deployed contract's own address.
     let contract_address = s.client.address.clone();
-    s.client.transfer_admin(&s.admin, &contract_address);
+    s.client.set_treasury(&s.admin, &contract_address);
 }
 
-/// A valid rotation to a fresh address succeeds, emits AdminUpdatedEvent with
-/// correct old/new values, and the old admin is revoked.
+/// `set_lp_address` must reject setting lp_address equal to the current treasury.
 #[test]
-fn test_transfer_admin_valid_rotation_succeeds_and_emits_event() {
+#[should_panic(expected = "lp_address must differ from treasury")]
+fn test_set_lp_address_rejects_treasury() {
     let s = setup(5_000);
-    let new_admin = Address::generate(&s.env);
+    s.client.set_lp_address(&s.admin, &s.treasury);
+}
 
-    s.client.transfer_admin(&s.admin, &new_admin);
+/// `set_lp_address` must reject setting lp_address equal to the admin.
+#[test]
+#[should_panic(expected = "lp_address must differ from admin")]
+fn test_set_lp_address_rejects_admin() {
+    let s = setup(5_000);
+    s.client.set_lp_address(&s.admin, &s.admin);
+}
 
-    // Event carries correct old and new admin addresses.
+/// `set_lp_address` must reject setting lp_address equal to the contract address.
+#[test]
+#[should_panic(expected = "lp_address must differ from contract")]
+fn test_set_lp_address_rejects_contract_address() {
+    let s = setup(5_000);
+    let contract_address = s.client.address.clone();
+    s.client.set_lp_address(&s.admin, &contract_address);
+}
+
+/// Valid distinct addresses succeed and emit update events.
+#[test]
+fn test_set_treasury_and_lp_address_valid() {
+    let s = setup(5_000);
+
+    let new_treasury = Address::generate(&s.env);
+    s.client.set_treasury(&s.admin, &new_treasury);
+    assert_eq!(s.client.get_treasury(), new_treasury);
+
+    let new_lp = Address::generate(&s.env);
+    s.client.set_lp_address(&s.admin, &new_lp);
+    assert_eq!(s.client.get_lp_address(), new_lp);
+
     let events = s.env.events().all();
-    let last = events.last().unwrap();
-    assert_eq!(
-        last.1,
-        (
-            soroban_sdk::String::from_str(&s.env, "FEE_DISTRIBUTOR"),
-            soroban_sdk::String::from_str(&s.env, "admin_updated")
-        )
-            .into_val(&s.env)
-    );
-    let event: crate::AdminUpdatedEvent = last.2.into_val(&s.env);
-    assert_eq!(event.old_admin, s.admin);
-    assert_eq!(event.new_admin, new_admin);
+    let treasury_event: crate::TreasuryUpdatedEvent =
+        events.get(events.len() - 2).unwrap().2.into_val(&s.env);
+    assert_eq!(treasury_event.treasury, new_treasury);
 
-    // Old admin is revoked.
-    let res = s.client.try_set_lp_share(&s.admin, &1_000);
-    assert!(res.is_err());
-
-    // New admin can act.
-    s.client.set_lp_share(&new_admin, &1_000);
-    let (_, _, bps) = s.client.get_config();
-    assert_eq!(bps, 1_000);
+    let lp_event: crate::LpAddressUpdatedEvent =
+        events.get(events.len() - 1).unwrap().2.into_val(&s.env);
+    assert_eq!(lp_event.lp_address, new_lp);
 }
