@@ -99,6 +99,24 @@ struct ConfirmationFailedEvent {
     required: u32,
 }
 
+/// Emitted when the admin updates the required confirmation count (issue #109).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ConfirmationCountUpdatedEvent {
+    pub caller: Address,
+    pub old_value: u32,
+    pub new_value: u32,
+}
+
+/// Emitted when the admin links or unlinks the payment_escrow contract (issue #109).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentEscrowContractUpdatedEvent {
+    pub caller: Address,
+    pub old_value: Option<Address>,
+    pub new_value: Option<Address>,
+}
+
 // ── contract ─────────────────────────────────────────────────────────────────
 
 #[contract]

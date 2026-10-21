@@ -50,6 +50,13 @@ pub struct PoolRemovedEvent {
     pub pool_id: Address,
 }
 
+// Issue #68: Event emitted when AMM depth threshold is updated
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DepthThresholdUpdatedEvent {
+    pub new_threshold_bps: u32,
+}
+
 #[soroban_sdk::contractclient(name = "AmmClient")]
 pub trait AmmInterface {
     fn get_reserves(env: Env) -> (i128, i128);
@@ -162,6 +169,14 @@ impl LiquidityRouter {
         }
 
         env.storage().instance().set(&DataKey::DepthThresholdBps, &threshold_bps);
+
+        // Emit event for audit trail (issue #68)
+        env.events().publish(
+            ("LIQUIDITY_ROUTER", "depth_threshold_updated"),
+            DepthThresholdUpdatedEvent {
+                new_threshold_bps: threshold_bps,
+            },
+        );
     }
 
     pub fn get_depth_threshold_bps(env: Env) -> u32 {
