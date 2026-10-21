@@ -5,7 +5,16 @@ mod test;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
 
 const LEDGERS_PER_30_DAYS: u32 = 172_800;
+/// Number of sub-window buckets used to approximate a rolling 30-day window.
+/// Each bucket covers `LEDGERS_PER_30_DAYS / VOLUME_BUCKETS` ledgers (5 days).
+const VOLUME_BUCKETS: u32 = 6;
+/// Ledgers covered by a single sub-window bucket (5 days).
+const LEDGERS_PER_BUCKET: u32 = LEDGERS_PER_30_DAYS / VOLUME_BUCKETS;
 const BPS_DENOMINATOR: i128 = 10_000;
+/// Upper sanity bound for the configured minimum fee (100_000_000 stroops,
+/// i.e. $10.00 equivalent). Prevents an accidental typo from clamping the fee
+/// to the full payment amount and confiscating merchant proceeds.
+const MAX_MIN_FEE_STROOPS: i128 = 100_000_000;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -14,11 +23,25 @@ pub struct FeeTier {
     pub fee_bps: u32,
 }
 
+/// Trailing 30-day volume tracked as a ring of `VOLUME_BUCKETS` sub-windows.
+///
+/// Instead of a single tumbling window that resets to zero every 30 days,
+/// volume is accumulated into `VOLUME_BUCKETS` buckets of
+/// `LEDGERS_PER_BUCKET` ledgers each. As time advances, buckets that fall
+/// outside the trailing 30-day span are cleared, so the reported volume
+/// decays smoothly (one bucket at a time) rather than cliff-resetting.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct MerchantVolume {
+    /// Ledger at which the current bucket ring was started.
     pub window_start_ledger: u32,
+    /// Total trailing volume across all live buckets (USDC).
     pub volume_usdc: i128,
+    /// Per-bucket volume, indexed by `(bucket_index % VOLUME_BUCKETS)`.
+    pub buckets: Vec<i128>,
+    /// Ledger at which each bucket was last written, used to expire stale
+    /// buckets. Indexed the same way as `buckets`.
+    pub bucket_ledgers: Vec<u32>,
 }
 
 #[contracttype]
@@ -46,6 +69,21 @@ pub struct TierAppliedEvent {
 pub struct FeeTiersUpdatedEvent {
     pub admin: Address,
     pub tiers: Vec<FeeTier>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettlementCallerUpdatedEvent {
+    pub caller: Address,
+    pub settlement_caller: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MinFeeUpdatedEvent {
+    pub caller: Address,
+    pub old_min_fee_stroops: i128,
+    pub new_min_fee_stroops: i128,
 }
 
 #[contract]
@@ -81,6 +119,14 @@ impl FeeCalculatorContract {
         env.storage()
             .instance()
             .set(&DataKey::SettlementCaller, &settlement_caller);
+
+        env.events().publish(
+            ("FEE", "settlement_caller_updated"),
+            SettlementCallerUpdatedEvent {
+                caller,
+                settlement_caller,
+            },
+        );
     }
 
     pub fn get_settlement_caller(env: Env) -> Option<Address> {
@@ -90,12 +136,26 @@ impl FeeCalculatorContract {
     pub fn set_min_fee_stroops(env: Env, caller: Address, min_fee_stroops: i128) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
-        if min_fee_stroops < 0 {
-            panic!("min_fee_stroops must be >= 0");
+        if min_fee_stroops < 0 || min_fee_stroops > MAX_MIN_FEE_STROOPS {
+            panic!("min_fee_stroops out of range");
         }
+        let old_min_fee_stroops: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinFeeStroops)
+            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&DataKey::MinFeeStroops, &min_fee_stroops);
+
+        env.events().publish(
+            ("FEE", "min_fee_updated"),
+            MinFeeUpdatedEvent {
+                caller,
+                old_min_fee_stroops,
+                new_min_fee_stroops: min_fee_stroops,
+            },
+        );
     }
 
     pub fn get_min_fee_stroops(env: Env) -> i128 {
@@ -165,7 +225,7 @@ impl FeeCalculatorContract {
     }
 
     /// Read-only quote: returns the fee breakdown for `amount` using the
-    /// merchant's current 30-day windowed volume, without mutating any
+    /// merchant's current trailing 30-day volume, without mutating any
     /// storage (issue #61).
     ///
     /// Safe for permissionless use by payment frontends and checkout APIs
@@ -178,7 +238,7 @@ impl FeeCalculatorContract {
             panic!("amount must be > 0");
         }
 
-        // Read current windowed volume without mutating storage.
+        // Read current trailing volume without mutating storage.
         let volume = Self::get_merchant_volume(env.clone(), merchant).volume_usdc;
         let fee_bps = Self::select_fee_bps(&env, volume);
 
@@ -205,11 +265,14 @@ impl FeeCalculatorContract {
         (fee, net, fee_bps)
     }
 
-    /// Read-only query: returns the merchant's current 30-day windowed volume.
-    /// If the window has elapsed, the windowed (reset) value is computed in
-    /// memory and returned without writing back to storage. The actual
-    /// reset-and-persist happens in `update_and_get_volume` during
-    /// `calculate_fee`.
+    /// Read-only query: returns the merchant's current trailing 30-day volume.
+    ///
+    /// Volume is tracked as `VOLUME_BUCKETS` sub-windows of
+    /// `LEDGERS_PER_BUCKET` ledgers each. Buckets older than the trailing
+    /// 30-day span are excluded from the returned total, so the value decays
+    /// one bucket at a time instead of resetting to zero at a single boundary.
+    /// This is computed in memory and not persisted; persistence happens in
+    /// `update_and_get_volume` during `calculate_fee`.
     pub fn get_merchant_volume(env: Env, merchant: Address) -> MerchantVolume {
         let current_ledger = env.ledger().sequence();
         let key = DataKey::MerchantVolume(merchant);
@@ -261,6 +324,13 @@ impl FeeCalculatorContract {
             panic!("tiers must not be empty");
         }
 
+        // First tier must start at zero to ensure all merchants (even with $0 volume)
+        // have an explicit tier assignment, preventing ambiguous fallback behavior
+        let first_tier = tiers.get(0).unwrap();
+        if first_tier.threshold_usdc != 0 {
+            panic!("first tier must have threshold_usdc == 0");
+        }
+
         let mut prev_threshold = -1;
         let mut prev_bps = u32::MAX;
 
@@ -268,9 +338,6 @@ impl FeeCalculatorContract {
             let tier = tiers.get(i).unwrap();
             if tier.threshold_usdc < 0 {
                 panic!("threshold must be >= 0");
-            }
-            if tier.fee_bps > 10_000 {
-                panic!("fee_bps must be <= 10000");
             }
             if tier.threshold_usdc <= prev_threshold {
                 panic!("thresholds must be strictly increasing");
@@ -281,6 +348,20 @@ impl FeeCalculatorContract {
             prev_threshold = tier.threshold_usdc;
             prev_bps = tier.fee_bps;
         }
+    }
+
+    fn select_fee_bps(env: &Env, volume_usdc: i128) -> u32 {
+        let tiers = Self::get_fee_tiers(env.clone());
+        let mut selected_bps = 0u32;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if volume_usdc >= tier.threshold_usdc {
+                selected_bps = tier.fee_bps;
+            } else {
+                break;
+            }
+        }
+        selected_bps
     }
 
     fn update_and_get_volume(env: &Env, merchant: &Address, amount: i128) -> i128 {
@@ -300,24 +381,9 @@ impl FeeCalculatorContract {
             data.volume_usdc = 0;
         }
 
-        data.volume_usdc = data.volume_usdc.checked_add(amount).expect("volume overflow");
-        env.storage().persistent().set(&key, &data);
-        data.volume_usdc
+        Self::prune_and_sum(&env, data, current_ledger)
     }
 
-    fn select_fee_bps(env: &Env, volume: i128) -> u32 {
-        let tiers: Vec<FeeTier> = env.storage().instance().get(&DataKey::FeeTiers).unwrap();
-        let mut selected_bps = tiers.get(0).unwrap().fee_bps;
+    /// Builds an empty bucket ring anchored 
 
-        for i in 0..tiers.len() {
-            let tier = tiers.get(i).unwrap();
-            if volume >= tier.threshold_usdc {
-                selected_bps = tier.fee_bps;
-            } else {
-                break;
-            }
-        }
-
-        selected_bps
-    }
-}
+/* … truncated 6070 chars — edit only what you need near the top … */

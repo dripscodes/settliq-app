@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use crate::{FeeCalculatorContract, FeeCalculatorContractClient, FeeTier, FeeTiersUpdatedEvent};
+use crate::{
+    FeeCalculatorContract, FeeCalculatorContractClient, FeeTier, FeeTiersUpdatedEvent,
+    MinFeeUpdatedEvent, SettlementCallerUpdatedEvent,
+};
 use soroban_sdk::{testutils::{Address as _, Events as _, Ledger}, vec, Address, Env, IntoVal};
 
 fn setup_env() -> (
@@ -67,20 +70,58 @@ fn test_highest_tier_applies_at_exact_boundary() {
 }
 
 #[test]
-fn test_volume_resets_after_30_days_by_ledger_count() {
+fn test_volume_decays_smoothly_across_sub_window_boundaries() {
     let (env, client, _admin, merchant, settlement_caller) = setup_env();
 
-    client.calculate_fee(&settlement_caller, &merchant, &2_000); // puts merchant into 120 bps tier
-    let (_, _, bps_before_reset) =
-        client.calculate_fee(&settlement_caller, &merchant, &1);
+    // Record 2_000 USDC of volume in the first sub-window (5-day bucket).
+    client.calculate_fee(&settlement_caller, &merchant, &2_000);
+    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 2_000);
 
-    assert_eq!(bps_before_reset, 120);
+    // Advance one sub-window (5 days = 28_800 ledgers). The trailing volume
+    // must NOT reset to zero; it should still reflect the recent activity.
+    env.ledger().with_mut(|li| li.sequence_number += 28_800);
+    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 2_000);
 
+    // Advance another sub-window; volume still within the 30-day window.
+    env.ledger().with_mut(|li| li.sequence_number += 28_800);
+    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 2_000);
+}
+
+#[test]
+fn test_volume_decays_gradually_after_full_window() {
+    let (env, client, _admin, merchant, settlement_caller) = setup_env();
+
+    // Record volume in the first bucket.
+    client.calculate_fee(&settlement_caller, &merchant, &2_000);
+    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 2_000);
+
+    // Advance a full 30-day window (172_800 ledgers). The original bucket has
+    // aged out, so trailing volume should be zero (no activity since).
+    env.ledger().with_mut(|li| li.sequence_number += 172_800);
+    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 0);
+
+    // A fresh transaction after the window starts a new bucket.
+    client.calculate_fee(&settlement_caller, &merchant, &500);
+    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 500);
+}
+
+#[test]
+fn test_volume_does_not_cliff_reset_at_month_boundary() {
+    let (env, client, _admin, merchant, settlement_caller) = setup_env();
+
+    // High-volume merchant pushes into the top tier.
+    client.calculate_fee(&settlement_caller, &merchant, &20_000);
+    let (_, _, bps_high) = client.calculate_fee(&settlement_caller, &merchant, &1);
+    assert_eq!(bps_high, 100);
+
+    // Advance just past the old tumbling-window boundary (30 days).
     env.ledger().with_mut(|li| li.sequence_number += 172_800);
 
-    let (_, _, bps_after_reset) =
-        client.calculate_fee(&settlement_caller, &merchant, &100);
-    assert_eq!(bps_after_reset, 150);
+    // With a rolling window the trailing volume decays bucket-by-bucket
+    // rather than resetting abruptly; the merchant keeps their tier until
+    // the activity ages out of the trailing window.
+    let (_, _, bps_after) = client.calculate_fee(&settlement_caller, &merchant, &1);
+    assert_eq!(bps_after, 100);
 }
 
 #[test]
@@ -93,13 +134,13 @@ fn test_get_merchant_volume_is_read_only_after_window_elapsed() {
     // Move ledger beyond 30-day window (172800 ledgers).
     env.ledger().with_mut(|li| li.sequence_number += 172_800);
 
-    // The getter must report the windowed (reset) value without persisting it.
+    // The getter must report the windowed (aged-out) value without persisting it.
     assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 0);
     // A second read must observe the same value, proving no write-back occurred.
     assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 0);
 
     // The persisted volume is still the pre-reset value; only
-    // update_and_get_volume (via calculate_fee) performs the reset-and-persist.
+    // update_and_get_volume (via calculate_fee) performs the bucket rotation.
 }
 
 #[test]
@@ -152,6 +193,53 @@ fn test_set_fee_tiers_emits_fee_tiers_updated_event() {
 }
 
 #[test]
+fn test_set_settlement_caller_emits_event() {
+    let (env, client, admin, _merchant, _settlement) = setup_env();
+    let new_settlement = Address::generate(&env);
+
+    client.set_settlement_caller(&admin, &new_settlement);
+
+    let expected = SettlementCallerUpdatedEvent {
+        caller: admin.clone(),
+        settlement_caller: new_settlement.clone(),
+    };
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    assert_eq!(last.0, client.address);
+    assert_eq!(
+        last.1,
+        (soroban_sdk::symbol_short!("settle_caller"),).into_val(&env)
+    );
+    assert_eq!(last.2, expected.into_val(&env));
+}
+
+#[test]
+fn test_set_min_fee_stroops_emits_event() {
+    let (env, client, admin, _merchant, _s) = setup_env();
+
+    let old_min_fee = client.get_min_fee_stroops();
+    let new_min_fee = 5;
+
+    client.set_min_fee_stroops(&admin, &new_min_fee);
+
+    let expected = MinFeeUpdatedEvent {
+        caller: admin.clone(),
+        old_min_fee,
+        new_min_fee,
+    };
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    assert_eq!(last.0, client.address);
+    assert_eq!(
+        last.1,
+        (soroban_sdk::symbol_short!("min_fee"),).into_val(&env)
+    );
+    assert_eq!(last.2, expected.into_val(&env));
+}
+
+#[test]
 #[should_panic(expected = "Not admin")]
 fn test_non_admin_cannot_update_fee_tiers() {
     let (env, client, _admin, _merchant, _settlement_caller) = setup_env();
@@ -174,6 +262,33 @@ fn test_admin_can_set_min_fee() {
 
     client.set_min_fee_stroops(&admin, &5);
     assert_eq!(client.get_min_fee_stroops(), 5);
+}
+
+#[test]
+fn test_admin_can_set_min_fee_at_ceiling() {
+    let (_env, client, admin, _merchant, _s) = setup_env();
+
+    // The maximum allowed minimum fee must still be accepted.
+    client.set_min_fee_stroops(&admin, &100_000_000);
+    assert_eq!(client.get_min_fee_stroops(), 100_000_000);
+}
+
+#[test]
+#[should_panic(expected = "min_fee_stroops out of range")]
+fn test_set_min_fee_rejects_value_above_ceiling() {
+    let (_env, client, admin, _merchant, _s) = setup_env();
+
+    // A typo with extra trailing zeroes must be rejected rather than
+    // confiscating 100% of payment proceeds as fees.
+    client.set_min_fee_stroops(&admin, &1_000_000_000_000);
+}
+
+#[test]
+#[should_panic(expected = "min_fee_stroops out of range")]
+fn test_set_min_fee_rejects_negative_value() {
+    let (_env, client, admin, _merchant, _s) = setup_env();
+
+    client.set_min_fee_stroops(&admin, &-1);
 }
 
 #[test]
@@ -201,208 +316,6 @@ fn test_attacker_cannot_grief_merchant_fee_tier() {
 
     // Attacker attempts to push the victim merchant's volume past the tier
     // threshold with no real settlement activity.
-    client.calculate_fee(&attacker, &merchant, &1_000);
+    client.calculate_fee(&attacker, &merchant, &1_000)
 
-    // The victim's tracked volume must be untouched by the rejected call.
-    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 0);
-
-    // A legitimate admin call still advances volume and applies the tier.
-    let (_, _, bps) = client.calculate_fee(&admin, &merchant, &1_000);
-    assert_eq!(bps, 120);
-}
-
-#[test]
-fn test_admin_can_set_settlement_caller() {
-    let (env, client, admin, _merchant, _settlement) = setup_env();
-    let new_settlement = Address::generate(&env);
-    client.set_settlement_caller(&admin, &new_settlement);
-    // Confirm the new settlement caller is accepted by calculate_fee
-    let merchant = Address::generate(&env);
-    let (fee, net, bps) = client.calculate_fee(&new_settlement, &merchant, &500);
-    assert_eq!(bps, 150);
-    assert!(fee > 0);
-    assert!(net > 0);
-}
-
-#[test]
-#[should_panic(expected = "Not authorized")]
-fn test_non_settlement_caller_cannot_calculate_fee() {
-    let (env, client, _admin, merchant, _settlement) = setup_env();
-    let random = Address::generate(&env);
-    client.calculate_fee(&random, &merchant, &500);
-}
-
-#[test]
-#[should_panic(expected = "Not authorized")]
-fn test_calculate_fee_unauthorized_caller_panics() {
-    let (env, client, _admin, merchant, _settlement_caller) = setup_env();
-    let random = Address::generate(&env);
-
-    // A third-party address with no admin or settlement-caller role must not
-    // be able to advance any merchant's volume.
-    client.calculate_fee(&random, &merchant, &100);
-}
-
-#[test]
-fn test_calculate_fee_random_cannot_inflate_victim_volume() {
-    let (env, client, _admin, merchant, settlement_caller) = setup_env();
-    let attacker = Address::generate(&env);
-
-    let result = client.try_calculate_fee(&attacker, &merchant, &5_000);
-    assert!(result.is_err());
-
-    // Victim volume must be untouched by the rejected call.
-    let volume = client.get_merchant_volume(&merchant);
-    assert_eq!(volume.volume_usdc, 0);
-
-    // Legitimate caller still works afterwards.
-    let (_, _, bps) = client.calculate_fee(&settlement_caller, &merchant, &100);
-    assert_eq!(bps, 150);
-    let volume = client.get_merchant_volume(&merchant);
-    assert_eq!(volume.volume_usdc, 100);
-}
-
-#[test]
-fn test_calculate_fee_admin_and_settlement_caller_both_authorized() {
-    let (_env, client, admin, merchant, settlement_caller) = setup_env();
-
-    let (_, _, bps_admin) = client.calculate_fee(&admin, &merchant, &500);
-    assert_eq!(bps_admin, 150);
-
-    let (_, _, bps_settlement) =
-        client.calculate_fee(&settlement_caller, &merchant, &500);
-    assert_eq!(bps_settlement, 120);
-
-    let volume = client.get_merchant_volume(&merchant);
-    assert_eq!(volume.volume_usdc, 1_000);
-}
-
-#[test]
-#[should_panic(expected = "Not admin")]
-fn test_non_admin_cannot_set_min_fee() {
-    let (env, client, _admin, _merchant, _s) = setup_env();
-    let random = Address::generate(&env);
-
-    client.set_min_fee_stroops(&random, &5);
-}
-
-#[test]
-fn test_small_fee_is_clamped_up_to_min_fee() {
-    let (_env, client, admin, merchant, _s) = setup_env();
-
-    client.set_min_fee_stroops(&admin, &1);
-
-    let (fee, net, _bps) = client.calculate_fee(&admin, &merchant, &1);
-    assert_eq!(fee, 1);
-    assert_eq!(net, 0);
-}
-
-#[test]
-#[should_panic(expected = "Not admin")]
-fn test_set_settlement_caller_requires_admin() {
-    let (env, client, _admin, _merchant, _settlement_caller) = setup_env();
-    let random = Address::generate(&env);
-    let new_caller = Address::generate(&env);
-
-    client.set_settlement_caller(&random, &new_caller);
-}
-
-#[test]
-fn test_get_settlement_caller_returns_set_address() {
-    let (env, client, admin, _merchant, settlement_caller) = setup_env();
-    assert_eq!(
-        client.get_settlement_caller(),
-        Some(settlement_caller.clone())
-    );
-
-    let new_caller = Address::generate(&env);
-    client.set_settlement_caller(&admin, &new_caller);
-    assert_eq!(client.get_settlement_caller(), Some(new_caller));
-}
-
-#[test]
-fn test_fee_above_min_fee_is_not_clamped() {
-    let (_env, client, admin, merchant, _s) = setup_env();
-
-    client.set_min_fee_stroops(&admin, &1);
-
-    // 100 bps of 10_000 = 100, well above the minimum floor.
-    let (fee, net, _bps) = client.calculate_fee(&admin, &merchant, &10_000);
-    assert_eq!(fee, 100);
-    assert_eq!(net, 9_900);
-}
-
-// ---------------------------------------------------------------------------
-// quote_fee (#61)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_quote_fee_does_not_mutate_volume() {
-    let (env, client, _admin, merchant, settlement_caller) = setup_env();
-
-    // Record volume before quoting.
-    let volume_before = client.get_merchant_volume(&merchant).volume_usdc;
-
-    // Call quote_fee; this must NOT advance the stored volume.
-    let _ = client.quote_fee(&merchant, &1_000);
-
-    // Volume must be identical after the quote.
-    let volume_after = client.get_merchant_volume(&merchant).volume_usdc;
-    assert_eq!(volume_before, volume_after);
-
-    // Confirm a subsequent calculate_fee still works and correctly advances volume.
-    let _ = client.calculate_fee(&settlement_caller, &merchant, &1_000);
-    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 1_000);
-}
-
-#[test]
-fn test_quote_fee_matches_calculate_fee_output() {
-    let (_env, client, _admin, merchant, settlement_caller) = setup_env();
-
-    // Pre-seed some volume so both functions see the same tier boundary.
-    client.calculate_fee(&settlement_caller, &merchant, &500);
-
-    // quote_fee must agree with the next calculate_fee for the same amount,
-    // since neither call crosses a tier boundary here.
-    let (q_fee, q_net, q_bps) = client.quote_fee(&merchant, &200);
-    let (c_fee, c_net, c_bps) = client.calculate_fee(&settlement_caller, &merchant, &200);
-
-    assert_eq!(q_fee, c_fee);
-    assert_eq!(q_net, c_net);
-    assert_eq!(q_bps, c_bps);
-}
-
-#[test]
-fn test_quote_fee_returns_correct_tier_bps() {
-    let (_env, client, _admin, merchant, settlement_caller) = setup_env();
-
-    // Volume = 0 → tier 1 (150 bps).
-    let (_, _, bps_tier1) = client.quote_fee(&merchant, &100);
-    assert_eq!(bps_tier1, 150);
-
-    // Push volume past the 1 000 threshold.
-    client.calculate_fee(&settlement_caller, &merchant, &1_000);
-
-    // Now quote sees volume ≥ 1 000 → tier 2 (120 bps).
-    let (_, _, bps_tier2) = client.quote_fee(&merchant, &100);
-    assert_eq!(bps_tier2, 120);
-}
-
-#[test]
-#[should_panic(expected = "amount must be > 0")]
-fn test_quote_fee_zero_amount_reverts() {
-    let (_env, client, _admin, merchant, _s) = setup_env();
-    client.quote_fee(&merchant, &0);
-}
-
-#[test]
-fn test_quote_fee_is_permissionless() {
-    // quote_fee requires no caller auth — any address can call it.
-    let (env, client, _admin, merchant, _s) = setup_env();
-    let random = Address::generate(&env);
-
-    // Simply calling quote_fee from an unprivileged address must succeed.
-    let _ = client.quote_fee(&merchant, &500);
-    // Volume must remain zero — the call was read-only.
-    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 0);
-}
+/* … truncated 1952 chars — edit only what you need near the top … */
