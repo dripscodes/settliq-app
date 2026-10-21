@@ -77,3 +77,8 @@ Grafana/Loki/Promtail configs under [`grafana/`](grafana/) and [`docker-compose.
 
 - **Website**: [https://settliq.xyz](https://settliq.xyz)
 - **Documentation**: [https://docs.settliq.xyz](https://docs.settliq.xyz)
+
+## Handsoff notes
+
+<!-- handsoff-issue-105 -->
+- #105: merchant_registry: register_merchant allows empty business name strings
