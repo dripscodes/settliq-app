@@ -243,7 +243,95 @@ impl FeeCalculatorContract {
             .storage()
             .persistent()
             .get::<DataKey, MerchantVolume>(&key)
-            .unwrap_or_else(|| Self::empty_volume(&env, current_ledger));
+            .unwrap_or(MerchantVolume {
+                window_start_ledger: current_ledger,
+                volume_usdc: 0,
+            });
+
+        if current_ledger.saturating_sub(data.window_start_ledger) >= LEDGERS_PER_30_DAYS {
+            MerchantVolume {
+                window_start_ledger: current_ledger,
+                volume_usdc: 0,
+            }
+        } else {
+            data
+        }
+    }
+
+    fn require_admin(env: &Env, caller: &Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if &admin != caller {
+            panic!("Not admin");
+        }
+    }
+
+    fn require_authorized_caller(env: &Env, caller: &Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller == &admin {
+            return;
+        }
+        if let Some(settlement_caller) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::SettlementCaller)
+        {
+            if caller == &settlement_caller {
+                return;
+            }
+        }
+        panic!("Not authorized");
+    }
+
+    fn validate_tiers(tiers: &Vec<FeeTier>) {
+        if tiers.len() == 0 {
+            panic!("tiers must not be empty");
+        }
+
+        // First tier must start at zero to ensure all merchants (even with $0 volume)
+        // have an explicit tier assignment, preventing ambiguous fallback behavior
+        let first_tier = tiers.get(0).unwrap();
+        if first_tier.threshold_usdc != 0 {
+            panic!("first tier must have threshold_usdc == 0");
+        }
+
+        let mut prev_threshold = -1;
+        let mut prev_bps = u32::MAX;
+
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if tier.threshold_usdc < 0 {
+                panic!("threshold must be >= 0");
+            }
+            if tier.fee_bps > 10_000 {
+                panic!("fee_bps must be <= 10000");
+            }
+            if tier.threshold_usdc <= prev_threshold {
+                panic!("thresholds must be strictly increasing");
+            }
+            if tier.fee_bps > prev_bps {
+                panic!("fee_bps must be non-increasing");
+            }
+            prev_threshold = tier.threshold_usdc;
+            prev_bps = tier.fee_bps;
+        }
+    }
+
+    fn update_and_get_volume(env: &Env, merchant: &Address, amount: i128) -> i128 {
+        let current_ledger = env.ledger().sequence();
+        let key = DataKey::MerchantVolume(merchant.clone());
+        let mut data = env
+            .storage()
+            .persistent()
+            .get::<DataKey, MerchantVolume>(&key)
+            .unwrap_or(MerchantVolume {
+                window_start_ledger: current_ledger,
+                volume_usdc: 0,
+            });
+
+        if current_ledger.saturating_sub(data.window_start_ledger) >= LEDGERS_PER_30_DAYS {
+            data.window_start_ledger = current_ledger;
+            data.volume_usdc = 0;
+        }
 
         Self::prune_and_sum(&env, data, current_ledger)
     }

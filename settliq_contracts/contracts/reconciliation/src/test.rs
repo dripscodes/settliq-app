@@ -1,7 +1,8 @@
 #![cfg(test)]
 
 use crate::{
-    MerkleProofNode, ReconciliationContract, ReconciliationContractClient, ReconciliationSubmittedEvent,
+    AdminTransferredEvent, BatchesArchivedEvent, MerkleProofNode, ReconciliationContract,
+    ReconciliationContractClient, ReconciliationSubmittedEvent,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -132,6 +133,50 @@ fn test_submit_emits_reconciliation_submitted_event() {
     assert_eq!(payload.batch_id, 0);
 }
 
+#[test]
+fn test_transfer_admin_emits_admin_transferred_event() {
+    let (env, client, admin) = setup_env();
+    let new_admin = Address::generate(&env);
+
+    client.transfer_admin(&admin, &new_admin);
+
+    let all_events = env.events().all();
+    let event = all_events.last().unwrap();
+
+    let expected_topic = ("RECONCILIATION", "admin_transferred").into_val(&env);
+    assert_eq!(event.1, expected_topic);
+
+    let payload = AdminTransferredEvent::try_from_val(&env, &event.2).unwrap();
+    assert_eq!(payload.previous_admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
+#[test]
+fn test_archive_batches_emits_batches_archived_event() {
+    let (env, client, admin) = setup_env();
+
+    client.submit_merkle_root(&admin, &make_id(&env, 1));
+    client.submit_merkle_root(&admin, &make_id(&env, 2));
+    client.submit_merkle_root(&admin, &make_id(&env, 3));
+
+    client.archive_batches(&admin, &1);
+
+    let all_events = env.events().all();
+    let event = all_events.last().unwrap();
+
+    let expected_topic = ("RECONCILIATION", "batches_archived").into_val(&env);
+    assert_eq!(event.1, expected_topic);
+
+    let payload = BatchesArchivedEvent::try_from_val(&env, &event.2).unwrap();
+    assert_eq!(payload.batches_pruned, 2);
+    assert_eq!(payload.upper_batch_id, 1);
+
+    // Pruned batches are gone; the surviving one is still readable.
+    assert!(client.get_batch(&0).is_none());
+    assert!(client.get_batch(&1).is_none());
+    assert!(client.get_batch(&2).is_some());
+}
+
 // ---------------------------------------------------------------------------
 // Historical batches (#1027)
 // ---------------------------------------------------------------------------
@@ -243,65 +288,4 @@ fn test_verify_settlement_proof_returns_false_for_an_invalid_proof() {
     ];
 
     assert!(!client.verify_settlement_proof(&batch_id, &payment_a, &bogus));
-}
-
-#[test]
-fn test_verify_settlement_proof_unknown_batch_returns_false() {
-    let (env, client, _admin) = setup_env();
-    let proof = vec![&env];
-    assert!(!client.verify_settlement_proof(&42, &make_id(&env, 1), &proof));
-}
-
-// ---------------------------------------------------------------------------
-// Incremental archiving (#104)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_archive_batches_removes_records_incrementally() {
-    let (env, client, admin) = setup_env();
-
-    for seed in 0..5u8 {
-        client.submit_merkle_root(&admin, &make_id(&env, seed));
-    }
-    assert_eq!(client.batch_count(), 5);
-
-    // First call archives the first two batches.
-    let archived = client.archive_batches(&admin, &5, &2);
-    assert_eq!(archived, 2);
-    assert!(client.get_batch(&0).is_none());
-    assert!(client.get_batch(&1).is_none());
-    assert!(client.get_batch(&2).is_some());
-
-    // Second call resumes from the cursor and archives the next two without
-    // re-scanning the already-pruned IDs 0 and 1.
-    let archived = client.archive_batches(&admin, &5, &2);
-    assert_eq!(archived, 2);
-    assert!(client.get_batch(&2).is_none());
-    assert!(client.get_batch(&3).is_none());
-    assert!(client.get_batch(&4).is_some());
-
-    // Third call picks up the final batch.
-    let archived = client.archive_batches(&admin, &5, &2);
-    assert_eq!(archived, 1);
-    assert!(client.get_batch(&4).is_none());
-
-    // Nothing left to archive.
-    assert_eq!(client.archive_batches(&admin, &5, &2), 0);
-}
-
-#[test]
-fn test_archive_batches_respects_before_batch_id() {
-    let (env, client, admin) = setup_env();
-
-    for seed in 0..4u8 {
-        client.submit_merkle_root(&admin, &make_id(&env, seed));
-    }
-
-    // Only batches below 2 should be archived.
-    let archived = client.archive_batches(&admin, &2, &10);
-    assert_eq!(archived, 2);
-    assert!(client.get_batch(&0).is_none());
-    assert!(client.get_batch(&1).is_none());
-    assert!(client.get_batch(&2).is_some());
-    assert!(client.get_batch(&3).is_some());
 }

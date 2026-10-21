@@ -61,6 +61,9 @@ pub enum DataKey {
     /// per day and would eventually exhaust instance storage.
     ActiveBucket,
     PartnerOk,
+    /// Last observed Stellar ledger sequence for health checks. Tracks ledger
+    /// progression to detect network stalls or freezes.
+    LastSeenLedgerSequence,
 }
 
 #[contract]
@@ -86,6 +89,9 @@ impl PlatformStatsContract {
 
     /// Admin-only: record a payment. If `settled`, adds to settled USD volume
     /// and increments the rolling 24h active-payments bucket.
+    ///
+    /// # Panics
+    /// If `amount_usd` is not strictly positive (> 0) when `settled` is true.
     pub fn record_payment(env: Env, caller: Address, amount_usd: i128, settled: bool) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
@@ -94,6 +100,11 @@ impl PlatformStatsContract {
         env.storage().instance().set(&DataKey::TotalPayments, &(tp + 1));
 
         if settled {
+            // Validate amount is positive to prevent volume corruption from negative values
+            if amount_usd <= 0 {
+                panic!("amount_usd must be strictly positive when settled");
+            }
+
             let vol: i128 = env
                 .storage()
                 .instance()
@@ -133,7 +144,14 @@ impl PlatformStatsContract {
 
     /// Live overview metrics, computed directly from storage.
     pub fn stats(env: Env) -> PlatformStats {
-        let bucket = env.ledger().sequence() / ACTIVE_WINDOW_LEDGERS;
+        let current_sequence = env.ledger().sequence();
+
+        // Update the last seen sequence for health checks (detects network stalls)
+        env.storage()
+            .instance()
+            .set(&DataKey::LastSeenLedgerSequence, &current_sequence);
+
+        let bucket = current_sequence / ACTIVE_WINDOW_LEDGERS;
         let active: u32 = env
             .storage()
             .instance()
@@ -170,9 +188,21 @@ impl PlatformStatsContract {
     }
 
     fn health(env: &Env) -> SystemHealth {
+        let current_sequence = env.ledger().sequence();
+        let last_seen: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LastSeenLedgerSequence)
+            .unwrap_or(current_sequence);
+
+        // stellar_ok is true when the ledger is actively progressing (sequence has increased).
+        // On first call or after contract reinitialization, this may be false for the first check,
+        // but will become true once a subsequent call detects progression.
+        let stellar_ok = current_sequence > last_seen;
+
         SystemHealth {
             storage_ok: env.storage().instance().has(&DataKey::Admin),
-            stellar_ok: env.ledger().sequence() > 0,
+            stellar_ok,
             partner_ok: env
                 .storage()
                 .instance()
