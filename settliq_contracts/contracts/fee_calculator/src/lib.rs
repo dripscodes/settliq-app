@@ -269,11 +269,11 @@ impl FeeCalculatorContract {
             if tier.threshold_usdc < 0 {
                 panic!("threshold must be >= 0");
             }
-            if tier.fee_bps > 10_000 {
-                panic!("fee_bps must be <= 10000");
-            }
             if tier.threshold_usdc <= prev_threshold {
-                panic!("thresholds must be strictly increasing");
+                panic!("thresholds must be strictly ascending");
+            }
+            if tier.fee_bps > BPS_DENOMINATOR as u32 {
+                panic!("fee_bps must be <= 10000");
             }
             if tier.fee_bps > prev_bps {
                 panic!("fee_bps must be non-increasing");
@@ -283,9 +283,29 @@ impl FeeCalculatorContract {
         }
     }
 
+    fn select_fee_bps(env: &Env, volume: i128) -> u32 {
+        let tiers: Vec<FeeTier> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeTiers)
+            .expect("tiers not initialized");
+
+        let mut selected = tiers.get(0).unwrap().fee_bps;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if volume >= tier.threshold_usdc {
+                selected = tier.fee_bps;
+            } else {
+                break;
+            }
+        }
+        selected
+    }
+
     fn update_and_get_volume(env: &Env, merchant: &Address, amount: i128) -> i128 {
         let current_ledger = env.ledger().sequence();
         let key = DataKey::MerchantVolume(merchant.clone());
+
         let mut data = env
             .storage()
             .persistent()
@@ -300,24 +320,15 @@ impl FeeCalculatorContract {
             data.volume_usdc = 0;
         }
 
-        data.volume_usdc = data.volume_usdc.checked_add(amount).expect("volume overflow");
+        data.volume_usdc = data.volume_usdc.checked_add(amount).expect("overflow");
+
         env.storage().persistent().set(&key, &data);
+        env.storage().persistent().extend_ttl(
+            &key,
+            LEDGERS_PER_30_DAYS,
+            LEDGERS_PER_30_DAYS + 17_280,
+        );
+
         data.volume_usdc
-    }
-
-    fn select_fee_bps(env: &Env, volume: i128) -> u32 {
-        let tiers: Vec<FeeTier> = env.storage().instance().get(&DataKey::FeeTiers).unwrap();
-        let mut selected_bps = tiers.get(0).unwrap().fee_bps;
-
-        for i in 0..tiers.len() {
-            let tier = tiers.get(i).unwrap();
-            if volume >= tier.threshold_usdc {
-                selected_bps = tier.fee_bps;
-            } else {
-                break;
-            }
-        }
-
-        selected_bps
     }
 }
