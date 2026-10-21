@@ -51,6 +51,23 @@ export class WaitlistService {
     return saved;
   }
 
+  /**
+   * Generate a referral code that does not already exist in the database.
+   * Retries up to REFERRAL_CODE_MAX_ATTEMPTS times on collision before failing.
+   */
+  private async generateUniqueReferralCode(): Promise<string> {
+    for (let attempt = 0; attempt < REFERRAL_CODE_MAX_ATTEMPTS; attempt++) {
+      const candidate = randomBytes(6).toString('hex').toUpperCase();
+      const collision = await this.waitlistRepo.findOne({
+        where: { referralCode: candidate },
+      });
+      if (!collision) return candidate;
+    }
+    throw new ConflictException(
+      'Unable to generate a unique referral code, please try again',
+    );
+  }
+
   async checkUsername(username: string): Promise<{ available: boolean }> {
     const existing = await this.waitlistRepo.findOne({ where: { username } });
     return { available: !existing };
