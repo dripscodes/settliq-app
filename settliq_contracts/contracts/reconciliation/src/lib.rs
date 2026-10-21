@@ -68,9 +68,25 @@ impl ReconciliationContract {
     }
 
     /// Transfers reconciliation authority to `new_admin`.
+    ///
+    /// # Panics
+    /// If `new_admin` equals the current admin (self-transfer) or the contract's own address
+    /// (would brick the contract since it cannot sign transactions).
     pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) {
         caller.require_auth();
         Self::require_admin(&env, &caller);
+
+        // Prevent self-transfer
+        if caller == new_admin {
+            panic!("Cannot transfer admin to self");
+        }
+
+        // Prevent transferring to the contract itself (would be unrecoverable)
+        let contract_address = env.current_contract_address();
+        if new_admin == contract_address {
+            panic!("Cannot transfer admin to contract address");
+        }
+
         env.storage().instance().set(&DataKey::Admin, &new_admin);
     }
 
@@ -202,13 +218,18 @@ impl ReconciliationContract {
 
     /// Permanently archives batches with IDs below `before_batch_id`, bounded
     /// by `max_batches` so retention can be applied incrementally. Current and
-    /// newer batches remain available for proof verification.
+    /// newer batches remain available for proof verification. The latest batch
+    /// is never archived, even if before_batch_id >= batch_count.
     pub fn archive_batches(env: Env, caller: Address, before_batch_id: u32, max_batches: u32) -> u32 {
         caller.require_auth();
         Self::require_admin(&env, &caller);
-        let upper = before_batch_id.min(Self::batch_count(env.clone()));
+        // Ensure we never delete batches at or after the latest batch. The latest
+        // batch ID is batch_count - 1, so we clamp before_batch_id to latest_batch_id
+        // to avoid deleting it or newer batches.
+        let latest_batch_id = Self::latest_batch_id(&env).unwrap_or(0);
+        let safe_upper = before_batch_id.min(latest_batch_id);
         let mut archived = 0;
-        for batch_id in 0..upper {
+        for batch_id in 0..safe_upper {
             if archived >= max_batches { break; }
             let key = DataKey::Batch(batch_id);
             if env.storage().persistent().has(&key) {
