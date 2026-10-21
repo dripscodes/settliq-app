@@ -48,6 +48,21 @@ pub struct FeeTiersUpdatedEvent {
     pub tiers: Vec<FeeTier>,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettlementCallerUpdatedEvent {
+    pub caller: Address,
+    pub settlement_caller: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MinFeeUpdatedEvent {
+    pub caller: Address,
+    pub old_min_fee_stroops: i128,
+    pub new_min_fee_stroops: i128,
+}
+
 #[contract]
 pub struct FeeCalculatorContract;
 
@@ -81,6 +96,14 @@ impl FeeCalculatorContract {
         env.storage()
             .instance()
             .set(&DataKey::SettlementCaller, &settlement_caller);
+
+        env.events().publish(
+            ("FEE", "settlement_caller_updated"),
+            SettlementCallerUpdatedEvent {
+                caller,
+                settlement_caller,
+            },
+        );
     }
 
     pub fn get_settlement_caller(env: Env) -> Option<Address> {
@@ -93,9 +116,23 @@ impl FeeCalculatorContract {
         if min_fee_stroops < 0 {
             panic!("min_fee_stroops must be >= 0");
         }
+        let old_min_fee_stroops: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinFeeStroops)
+            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&DataKey::MinFeeStroops, &min_fee_stroops);
+
+        env.events().publish(
+            ("FEE", "min_fee_updated"),
+            MinFeeUpdatedEvent {
+                caller,
+                old_min_fee_stroops,
+                new_min_fee_stroops: min_fee_stroops,
+            },
+        );
     }
 
     pub fn get_min_fee_stroops(env: Env) -> i128 {
@@ -269,9 +306,6 @@ impl FeeCalculatorContract {
             if tier.threshold_usdc < 0 {
                 panic!("threshold must be >= 0");
             }
-            if tier.fee_bps > 10_000 {
-                panic!("fee_bps must be <= 10000");
-            }
             if tier.threshold_usdc <= prev_threshold {
                 panic!("thresholds must be strictly increasing");
             }
@@ -281,6 +315,20 @@ impl FeeCalculatorContract {
             prev_threshold = tier.threshold_usdc;
             prev_bps = tier.fee_bps;
         }
+    }
+
+    fn select_fee_bps(env: &Env, volume_usdc: i128) -> u32 {
+        let tiers = Self::get_fee_tiers(env.clone());
+        let mut selected_bps = 0u32;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if volume_usdc >= tier.threshold_usdc {
+                selected_bps = tier.fee_bps;
+            } else {
+                break;
+            }
+        }
+        selected_bps
     }
 
     fn update_and_get_volume(env: &Env, merchant: &Address, amount: i128) -> i128 {
@@ -300,24 +348,8 @@ impl FeeCalculatorContract {
             data.volume_usdc = 0;
         }
 
-        data.volume_usdc = data.volume_usdc.checked_add(amount).expect("volume overflow");
+        data.volume_usdc = data.volume_usdc.checked_add(amount).expect("overflow");
         env.storage().persistent().set(&key, &data);
         data.volume_usdc
-    }
-
-    fn select_fee_bps(env: &Env, volume: i128) -> u32 {
-        let tiers: Vec<FeeTier> = env.storage().instance().get(&DataKey::FeeTiers).unwrap();
-        let mut selected_bps = tiers.get(0).unwrap().fee_bps;
-
-        for i in 0..tiers.len() {
-            let tier = tiers.get(i).unwrap();
-            if volume >= tier.threshold_usdc {
-                selected_bps = tier.fee_bps;
-            } else {
-                break;
-            }
-        }
-
-        selected_bps
     }
 }
