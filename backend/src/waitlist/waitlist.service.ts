@@ -66,10 +66,19 @@ export class WaitlistService {
     if (!entry) {
       throw new NotFoundException('Email is not on the waitlist');
     }
-    const position = await this.waitlistRepo.count({
-      where: { createdAt: LessThanOrEqual(entry.createdAt) },
-    });
-    return { position };
+
+    // Rank by referrals DESC, then createdAt ASC (stable tie-break on id) so
+    // accumulated referrals advance a user's queue position.
+    const ahead = await this.waitlistRepo
+      .createQueryBuilder('w')
+      .where('w.referrals > :referrals', { referrals: entry.referrals })
+      .orWhere(
+        'w.referrals = :referrals AND (w.createdAt < :createdAt OR (w.createdAt = :createdAt AND w.id <= :id))',
+        { referrals: entry.referrals, createdAt: entry.createdAt, id: entry.id },
+      )
+      .getCount();
+
+    return { position: ahead };
   }
 
   async unsubscribe(token: string): Promise<{ message: string }> {

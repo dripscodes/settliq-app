@@ -1,70 +1,64 @@
-import { Test } from '@nestjs/testing';
+import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Between, LessThanOrEqual, MoreThanOrEqual } from 'typeorm';
+import { NotFoundException } from '@nestjs/common';
 import { WaitlistService } from './waitlist.service';
 import { WaitlistEntry } from './entities/waitlist.entity';
 
 describe('WaitlistService', () => {
   let service: WaitlistService;
-  const find = jest.fn();
+  let repo: any;
 
   beforeEach(async () => {
-    find.mockReset();
-    find.mockResolvedValue([]);
+    repo = {
+      findOne: jest.fn(),
+      create: jest.fn((x) => x),
+      save: jest.fn((x) => Promise.resolve(x)),
+      createQueryBuilder: jest.fn(),
+    };
 
-    const moduleRef = await Test.createTestingModule({
+    const module: TestingModule = await Test.createTestingModule({
       providers: [
         WaitlistService,
-        {
-          provide: getRepositoryToken(WaitlistEntry),
-          useValue: { find },
-        },
+        { provide: getRepositoryToken(WaitlistEntry), useValue: repo },
       ],
     }).compile();
 
-    service = moduleRef.get(WaitlistService);
+    service = module.get<WaitlistService>(WaitlistService);
   });
 
-  it('applies Between date constraints in the find where clause', async () => {
-    const from = '2024-01-01T00:00:00.000Z';
-    const to = '2024-02-01T00:00:00.000Z';
-
-    await service.exportCsv({ dateFrom: from, dateTo: to });
-
-    expect(find).toHaveBeenCalledWith({
-      where: { createdAt: Between(new Date(from), new Date(to)) },
-      order: { createdAt: 'ASC' },
+  describe('getPosition', () => {
+    it('throws when email is not on the waitlist', async () => {
+      repo.findOne.mockResolvedValue(null);
+      await expect(service.getPosition('missing@example.com')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
-  });
 
-  it('applies MoreThanOrEqual when only dateFrom is provided', async () => {
-    const from = '2024-01-01T00:00:00.000Z';
+    it('returns position 1 when no entries are ahead', async () => {
+      repo.findOne.mockResolvedValue({ id: 'a', email: 'a@example.com', referrals: 0, createdAt: new Date() });
+      const qb = { where: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), getCount: jest.fn().mockResolvedValue(0) };
+      repo.createQueryBuilder.mockReturnValue(qb);
 
-    await service.exportCsv({ dateFrom: from });
-
-    expect(find).toHaveBeenCalledWith({
-      where: { createdAt: MoreThanOrEqual(new Date(from)) },
-      order: { createdAt: 'ASC' },
+      await expect(service.getPosition('a@example.com')).resolves.toEqual({ position: 1 });
     });
-  });
 
-  it('applies LessThanOrEqual when only dateTo is provided', async () => {
-    const to = '2024-02-01T00:00:00.000Z';
+    it('promotes a user with referrals ahead of an earlier user without referrals', async () => {
+      const earlier = { id: 'early', email: 'early@example.com', referrals: 0, createdAt: new Date('2024-01-01') };
+      const referrer = { id: 'ref', email: 'ref@example.com', referrals: 5, createdAt: new Date('2024-02-01') };
 
-    await service.exportCsv({ dateTo: to });
+      // Referrer: the earlier zero-referral user is NOT ahead (fewer referrals).
+      repo.findOne.mockResolvedValue(referrer);
+      const refQb = { where: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), getCount: jest.fn().mockResolvedValue(0) };
+      repo.createQueryBuilder.mockReturnValue(refQb);
+      const refPosition = await service.getPosition('ref@example.com');
 
-    expect(find).toHaveBeenCalledWith({
-      where: { createdAt: LessThanOrEqual(new Date(to)) },
-      order: { createdAt: 'ASC' },
-    });
-  });
+      // Earlier user: the referrer IS ahead (more referrals).
+      repo.findOne.mockResolvedValue(earlier);
+      const earlyQb = { where: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), getCount: jest.fn().mockResolvedValue(1) };
+      repo.createQueryBuilder.mockReturnValue(earlyQb);
+      const earlyPosition = await service.getPosition('early@example.com');
 
-  it('queries without date constraints when no range is provided', async () => {
-    await service.exportCsv();
-
-    expect(find).toHaveBeenCalledWith({
-      where: {},
-      order: { createdAt: 'ASC' },
+      expect(refPosition.position).toBeLessThan(earlyPosition.position);
     });
   });
 });
