@@ -8,13 +8,16 @@
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Vec};
 
+/// A single sibling node on the path from a leaf to the Merkle root.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MerkleProofNode {
     pub sibling: BytesN<32>,
+    /// `true` when `sibling` sits on the left of the current hash.
     pub is_left: bool,
 }
 
+/// A stored reconciliation batch.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchRecord {
