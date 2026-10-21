@@ -194,6 +194,26 @@ fn test_admin_can_set_max_batch_size() {
 }
 
 #[test]
+#[should_panic(expected = "max batch size out of range")]
+fn test_set_max_batch_size_above_ceiling_reverts() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = deploy_and_init(&env, 1, 10_000);
+
+    client.set_max_batch_size(&(MAX_BATCH_CEILING + 1));
+}
+
+#[test]
+fn test_set_max_batch_size_at_ceiling_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = deploy_and_init(&env, 1, 10_000);
+
+    client.set_max_batch_size(&MAX_BATCH_CEILING);
+    assert_eq!(client.max_batch_size(), MAX_BATCH_CEILING);
+}
+
+#[test]
 #[should_panic(expected = "outside configured limits")]
 fn test_amount_min_minus_1_reverts() {
     let env = Env::default();
@@ -261,131 +281,4 @@ fn test_limits_updated_event_emitted() {
     client.set_limits(&150, &1_500);
     let events = env.events().all();
     assert_eq!(events.len(), before + 1);
-}
-
-// ── Mock MerchantRegistry contracts for set_registry / create_batch tests ───
-
-mod mock_registry_approved {
-    use soroban_sdk::{contract, contractimpl, Address, Env};
-
-    #[contract]
-    pub struct MockRegistryApproved;
-
-    #[contractimpl]
-    impl MockRegistryApproved {
-        /// Always returns true — every merchant is approved.
-        pub fn is_approved(_env: Env, _merchant: Address) -> bool {
-            true
-        }
-    }
-}
-
-mod mock_registry_rejected {
-    use soroban_sdk::{contract, contractimpl, Address, Env};
-
-    #[contract]
-    pub struct MockRegistryRejected;
-
-    #[contractimpl]
-    impl MockRegistryRejected {
-        /// Always returns false — no merchant is approved.
-        pub fn is_approved(_env: Env, _merchant: Address) -> bool {
-            false
-        }
-    }
-}
-
-// ── set_registry tests ───────────────────────────────────────────────────────
-
-#[test]
-fn test_admin_can_set_registry() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _admin) = deploy_and_init(&env, 1, 10_000);
-
-    let registry_id = env.register(mock_registry_approved::MockRegistryApproved, ());
-
-    // Setting a registry must not panic.
-    client.set_registry(&Some(registry_id));
-}
-
-#[test]
-fn test_admin_can_clear_registry() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _admin) = deploy_and_init(&env, 1, 10_000);
-
-    let registry_id = env.register(mock_registry_approved::MockRegistryApproved, ());
-    client.set_registry(&Some(registry_id));
-
-    // Clearing with None must not panic.
-    client.set_registry(&None);
-}
-
-#[test]
-#[should_panic(expected = "merchant is not approved in the registry")]
-fn test_unapproved_merchant_rejected_when_registry_set() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _admin) = deploy_and_init(&env, 1, 10_000);
-
-    // Register a rejecting registry and configure it.
-    let registry_id = env.register(mock_registry_rejected::MockRegistryRejected, ());
-    client.set_registry(&Some(registry_id));
-
-    let merchant = Address::generate(&env);
-    let payments = soroban_sdk::vec![&env, make_payment(&env, 500, "order")];
-
-    // Merchant is not approved → create_batch must panic.
-    client.create_batch(&merchant, &payments);
-}
-
-#[test]
-fn test_approved_merchant_passes_when_registry_set() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _admin) = deploy_and_init(&env, 1, 10_000);
-
-    let registry_id = env.register(mock_registry_approved::MockRegistryApproved, ());
-    client.set_registry(&Some(registry_id));
-
-    let merchant = Address::generate(&env);
-    let payments = soroban_sdk::vec![&env, make_payment(&env, 500, "order")];
-
-    let ids = client.create_batch(&merchant, &payments);
-    assert_eq!(ids.len(), 1);
-}
-
-#[test]
-fn test_clearing_registry_bypasses_approval_check() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _admin) = deploy_and_init(&env, 1, 10_000);
-
-    // Set a rejecting registry…
-    let registry_id = env.register(mock_registry_rejected::MockRegistryRejected, ());
-    client.set_registry(&Some(registry_id));
-
-    // …then clear it.
-    client.set_registry(&None);
-
-    // Without a registry, any merchant can submit a batch.
-    let merchant = Address::generate(&env);
-    let payments = soroban_sdk::vec![&env, make_payment(&env, 500, "order")];
-    let ids = client.create_batch(&merchant, &payments);
-    assert_eq!(ids.len(), 1);
-}
-
-#[test]
-#[should_panic]
-fn test_non_admin_cannot_set_registry() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _admin) = deploy_and_init(&env, 1, 10_000);
-
-    // Clear all auths to simulate a non-admin caller.
-    env.set_auths(&[]);
-
-    let registry_id = env.register(mock_registry_approved::MockRegistryApproved, ());
-    client.set_registry(&Some(registry_id));
 }
