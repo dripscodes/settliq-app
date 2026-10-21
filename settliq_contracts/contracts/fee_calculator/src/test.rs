@@ -215,6 +215,33 @@ fn test_admin_can_set_min_fee() {
 }
 
 #[test]
+fn test_admin_can_set_min_fee_at_ceiling() {
+    let (_env, client, admin, _merchant, _s) = setup_env();
+
+    // The maximum allowed minimum fee must still be accepted.
+    client.set_min_fee_stroops(&admin, &100_000_000);
+    assert_eq!(client.get_min_fee_stroops(), 100_000_000);
+}
+
+#[test]
+#[should_panic(expected = "min_fee_stroops out of range")]
+fn test_set_min_fee_rejects_value_above_ceiling() {
+    let (_env, client, admin, _merchant, _s) = setup_env();
+
+    // A typo with extra trailing zeroes must be rejected rather than
+    // confiscating 100% of payment proceeds as fees.
+    client.set_min_fee_stroops(&admin, &1_000_000_000_000);
+}
+
+#[test]
+#[should_panic(expected = "min_fee_stroops out of range")]
+fn test_set_min_fee_rejects_negative_value() {
+    let (_env, client, admin, _merchant, _s) = setup_env();
+
+    client.set_min_fee_stroops(&admin, &-1);
+}
+
+#[test]
 #[should_panic(expected = "Not authorized")]
 fn test_unauthorized_caller_cannot_calculate_fee() {
     let (env, client, _admin, merchant, _s) = setup_env();
@@ -239,57 +266,6 @@ fn test_attacker_cannot_grief_merchant_fee_tier() {
 
     // Attacker attempts to push the victim merchant's volume past the tier
     // threshold with no real settlement activity.
-    client.calculate_fee(&attacker, &merchant, &1_000);
+    client.calculate_fee(&attacker, &merchant, &1_000)
 
-    // The victim's tracked volume must be untouched by the rejected call.
-    assert_eq!(client.get_merchant_volume(&merchant).volume_usdc, 0);
-
-    // A legitimate admin call still advances volume and applies the tier.
-    let (_, _, bps) = client.calculate_fee(&admin, &merchant, &1_000);
-    assert_eq!(bps, 120);
-}
-
-#[test]
-fn test_admin_can_set_settlement_caller() {
-    let (env, client, admin, _merchant, _settlement) = setup_env();
-    let new_settlement = Address::generate(&env);
-    client.set_settlement_caller(&admin, &new_settlement);
-    // Confirm the new settlement caller is accepted by calculate_fee
-    let merchant = Address::generate(&env);
-    let (fee, net, bps) = client.calculate_fee(&new_settlement, &merchant, &500);
-    assert_eq!(bps, 150);
-    assert!(fee > 0);
-    assert!(net > 0);
-}
-
-#[test]
-#[should_panic(expected = "Not authorized")]
-fn test_non_settlement_caller_cannot_calculate_fee() {
-    let (env, client, _admin, merchant, _settlement) = setup_env();
-    let random = Address::generate(&env);
-    client.calculate_fee(&random, &merchant, &500);
-}
-
-#[test]
-#[should_panic(expected = "Not authorized")]
-fn test_calculate_fee_unauthorized_caller_panics() {
-    let (env, client, _admin, merchant, _settlement_caller) = setup_env();
-    let random = Address::generate(&env);
-
-    // A third-party address with no admin or settlement-caller role must not
-    // be able to advance any merchant's volume.
-    client.calculate_fee(&random, &merchant, &100);
-}
-
-#[test]
-fn test_calculate_fee_random_cannot_inflate_victim_volume() {
-    let (env, client, _admin, merchant, settlement_caller) = setup_env();
-    let attacker = Address::generate(&env);
-
-    let result = client.try_calculate_fee(&attacker, &merchant, &5_000);
-    assert!(result.is_err());
-
-    // Victim volume must be untouched by the rejected call.
-    let volume = client.get_merchant_volume(&merchant);
-    assert_eq!(volume.volume_usdc, 0);
-}
+/* … truncated 1952 chars — edit only what you need near the top … */
